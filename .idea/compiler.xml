@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CompilerConfiguration">
+    <annotationProcessing>
+      <profile name="Annotation profile for project1" enabled="true">
+        <sourceOutputDir name="../generated-sources/annotations" />
+        <sourceTestOutputDir name="../generated-test-sources/test-annotations" />
+        <processorPath useClasspath="false">
+          <entry name="$MAVEN_REPOSITORY$/pt/unl/fct/di/novasys/babel2/babel2-ip-compiler/2.3.0/babel2-ip-compiler-2.3.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/squareup/javapoet/1.13.0/javapoet-1.13.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/pt/unl/fct/di/novasys/babel2/babel2-ip-api/2.3.0/babel2-ip-api-2.3.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/apache/logging/log4j/log4j-api/2.26.1/log4j-api-2.26.1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/it/unimi/dsi/fastutil/8.5.19/fastutil-8.5.19.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/jspecify/jspecify/1.0.0/jspecify-1.0.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-all/4.2.19.Final/netty-all-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-buffer/4.2.19.Final/netty-buffer-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-base/4.2.19.Final/netty-codec-base-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec/4.2.19.Final/netty-codec-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-dns/4.2.19.Final/netty-codec-dns-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-haproxy/4.2.19.Final/netty-codec-haproxy-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-compression/4.2.19.Final/netty-codec-compression-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-http/4.2.19.Final/netty-codec-http-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-http2/4.2.19.Final/netty-codec-http2-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-http3/4.2.19.Final/netty-codec-http3-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-memcache/4.2.19.Final/netty-codec-memcache-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-mqtt/4.2.19.Final/netty-codec-mqtt-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-redis/4.2.19.Final/netty-codec-redis-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-smtp/4.2.19.Final/netty-codec-smtp-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-socks/4.2.19.Final/netty-codec-socks-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-stomp/4.2.19.Final/netty-codec-stomp-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-xml/4.2.19.Final/netty-codec-xml-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-protobuf/4.2.19.Final/netty-codec-protobuf-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-marshalling/4.2.19.Final/netty-codec-marshalling-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-common/4.2.19.Final/netty-common-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-handler/4.2.19.Final/netty-handler-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-unix-common/4.2.19.Final/netty-transport-native-unix-common-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-handler-proxy/4.2.19.Final/netty-handler-proxy-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-handler-ssl-ocsp/4.2.19.Final/netty-handler-ssl-ocsp-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-resolver/4.2.19.Final/netty-resolver-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-resolver-dns/4.2.19.Final/netty-resolver-dns-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport/4.2.19.Final/netty-transport-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-rxtx/4.2.19.Final/netty-transport-rxtx-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-sctp/4.2.19.Final/netty-transport-sctp-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-udt/4.2.19.Final/netty-transport-udt-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-classes-epoll/4.2.19.Final/netty-transport-classes-epoll-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-classes-kqueue/4.2.19.Final/netty-transport-classes-kqueue-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-resolver-dns-classes-macos/4.2.19.Final/netty-resolver-dns-classes-macos-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-classes-io_uring/4.2.19.Final/netty-transport-classes-io_uring-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-classes-quic/4.2.19.Final/netty-codec-classes-quic-4.2.19.Final.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-epoll/4.2.19.Final/netty-transport-native-epoll-4.2.19.Final-linux-x86_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-epoll/4.2.19.Final/netty-transport-native-epoll-4.2.19.Final-linux-aarch_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-epoll/4.2.19.Final/netty-transport-native-epoll-4.2.19.Final-linux-riscv64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-io_uring/4.2.19.Final/netty-transport-native-io_uring-4.2.19.Final-linux-x86_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-io_uring/4.2.19.Final/netty-transport-native-io_uring-4.2.19.Final-linux-aarch_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-io_uring/4.2.19.Final/netty-transport-native-io_uring-4.2.19.Final-linux-riscv64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-kqueue/4.2.19.Final/netty-transport-native-kqueue-4.2.19.Final-osx-x86_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-transport-native-kqueue/4.2.19.Final/netty-transport-native-kqueue-4.2.19.Final-osx-aarch_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-resolver-dns-native-macos/4.2.19.Final/netty-resolver-dns-native-macos-4.2.19.Final-osx-x86_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-resolver-dns-native-macos/4.2.19.Final/netty-resolver-dns-native-macos-4.2.19.Final-osx-aarch_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-native-quic/4.2.19.Final/netty-codec-native-quic-4.2.19.Final-linux-x86_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-native-quic/4.2.19.Final/netty-codec-native-quic-4.2.19.Final-linux-aarch_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-native-quic/4.2.19.Final/netty-codec-native-quic-4.2.19.Final-osx-x86_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-native-quic/4.2.19.Final/netty-codec-native-quic-4.2.19.Final-osx-aarch_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/netty/netty-codec-native-quic/4.2.19.Final/netty-codec-native-quic-4.2.19.Final-windows-x86_64.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/bouncycastle/bcprov-jdk18on/1.86/bcprov-jdk18on-1.86.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/bouncycastle/bcpkix-jdk18on/1.86/bcpkix-jdk18on-1.86.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/bouncycastle/bcutil-jdk18on/1.86/bcutil-jdk18on-1.86.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/auto/service/auto-service/1.1.1/auto-service-1.1.1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/auto/service/auto-service-annotations/1.1.1/auto-service-annotations-1.1.1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/auto/auto-common/1.2.1/auto-common-1.2.1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/guava/guava/32.0.1-jre/guava-32.0.1-jre.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/guava/failureaccess/1.0.1/failureaccess-1.0.1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/guava/listenablefuture/9999.0-empty-to-avoid-conflict-with-guava/listenablefuture-9999.0-empty-to-avoid-conflict-with-guava.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/code/findbugs/jsr305/3.0.2/jsr305-3.0.2.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/checkerframework/checker-qual/3.33.0/checker-qual-3.33.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/j2objc/j2objc-annotations/2.8/j2objc-annotations-2.8.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/errorprone/error_prone_core/2.49.0/error_prone_core-2.49.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/errorprone/error_prone_annotation/2.49.0/error_prone_annotation-2.49.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/errorprone/error_prone_check_api/2.49.0/error_prone_check_api-2.49.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/github/java-diff-utils/java-diff-utils/4.12/java-diff-utils-4.12.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/github/kevinstern/software-and-algorithms/1.0/software-and-algorithms-1.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/github/ben-manes/caffeine/caffeine/3.0.5/caffeine-3.0.5.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/googlejavaformat/google-java-format/1.35.0/google-java-format-1.35.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/pcollections/pcollections/4.0.1/pcollections-4.0.1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/io/github/eisop/dataflow-errorprone/3.41.0-eisop1/dataflow-errorprone-3.41.0-eisop1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/auto/value/auto-value-annotations/1.9/auto-value-annotations-1.9.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/errorprone/error_prone_annotations/2.49.0/error_prone_annotations-2.49.0.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/google/protobuf/protobuf-java/4.33.2/protobuf-java-4.33.2.jar" />
+          <entry name="$MAVEN_REPOSITORY$/javax/inject/javax.inject/1/javax.inject-1.jar" />
+          <entry name="$MAVEN_REPOSITORY$/com/uber/nullaway/nullaway/0.13.4/nullaway-0.13.4.jar" />
+          <entry name="$MAVEN_REPOSITORY$/org/checkerframework/dataflow-nullaway/4.0.0/dataflow-nullaway-4.0.0.jar" />
+        </processorPath>
+        <module name="project1.main" />
+        <module name="project1.test" />
+      </profile>
+    </annotationProcessing>
+  </component>
+  <component name="JavacSettings">
+    <option name="ADDITIONAL_OPTIONS_OVERRIDE">
+      <module name="project1" options="-XDcompilePolicy=simple --should-stop=ifError=FLOW -XDaddTypeAnnotationsToSymbol=true &quot;-Xplugin:ErrorProne -XepDisableAllChecks -XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:CheckContracts=true -XepOpt:NullAway:JSpecifyMode=true -Xep:NullAway:WARN -XepExcludedPaths:(.*/test/java/.*|.*/target/generated-sources/.*)&quot; -J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED -J--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED -J--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED" />
+      <module name="project1.main" options="-XDcompilePolicy=simple --should-stop=ifError=FLOW -XDaddTypeAnnotationsToSymbol=true &quot;-Xplugin:ErrorProne -XepDisableAllChecks -XepOpt:NullAway:OnlyNullMarked=true -XepOpt:NullAway:CheckContracts=true -XepOpt:NullAway:JSpecifyMode=true -Xep:NullAway:WARN -XepExcludedPaths:(.*/test/java/.*|.*/target/generated-sources/.*)&quot; -J--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.main=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.model=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.processing=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED -J--add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED -J--add-opens=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED -J--add-opens=jdk.compiler/com.sun.tools.javac.comp=ALL-UNNAMED" />
+    </option>
+  </component>
+</project>

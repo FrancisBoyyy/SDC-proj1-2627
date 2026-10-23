@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Default logging configuration (used when no -Dlog4j2.configurationFile is given) -->
+<Configuration status="WARN">
+    <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+            <PatternLayout noConsoleNoAnsi="true"
+                pattern="%d{HH:mm:ss.SSS} %highlight{%-5level}{FATAL=bg_red, ERROR=red, WARN=yellow, INFO=green, DEBUG=cyan} [%t] %style{%logger{1.}}{cyan} - %msg%n" />
+        </Console>
+    </Appenders>
+    <Loggers>
+        <Root level="INFO">
+            <AppenderRef ref="Console" />
+        </Root>
+    </Loggers>
+</Configuration>
