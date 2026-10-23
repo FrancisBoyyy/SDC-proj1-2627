@@ -2,6 +2,7 @@ package broadcast;
 
 import broadcast.messages.BroadcastMessage;
 import broadcast.messages.EchoBroadcastMessage;
+import broadcast.utils.EchoEntry;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
@@ -16,8 +17,6 @@ import pt.unl.fct.di.novasys.babel2.core.signed.SignedMessageBabelProtocol;
 import pt.unl.fct.di.novasys.babel2.core.signed.annotations.UponSignedMessageIn;
 
 import java.util.*;
-
-record EchoEntry(BabelNode p, BabelMessage m) {}
 
 public class ByzantineConsistentBroadcastProtocol
         implements BroadcastProviderBabelProtocol, MembershipConsumerBabelProtocol, SignedMessageBabelProtocol {
@@ -126,7 +125,7 @@ public class ByzantineConsistentBroadcastProtocol
     public void uponBroadcastRequest(BabelMessage message) {
         LOGGER.info("Broadcast request for {}... sending to current membership", message);
         var broadcastMessage = new SignedBabelMessage<>(
-                new BroadcastMessage(UUID.randomUUID(), message));
+                new BroadcastMessage(UUID.randomUUID(), runtime.getMyself(), message));
         sendToEveryone(broadcastMessage);
     }
 
