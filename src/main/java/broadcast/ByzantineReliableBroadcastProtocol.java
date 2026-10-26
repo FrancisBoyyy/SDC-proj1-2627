@@ -2,7 +2,7 @@ package broadcast;
 
 import broadcast.messages.BroadcastMessage;
 import broadcast.messages.EchoBroadcastMessage;
-import broadcast.utils.EchoEntry;
+import broadcast.messages.ReadyBroadcastMessage;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
@@ -18,16 +18,36 @@ import pt.unl.fct.di.novasys.babel2.core.signed.annotations.UponSignedMessageIn;
 
 import java.util.*;
 
+/**
+ * Assume N >= 3f + 1, where N = neighbors + 1 (this node included) and f is the maximum number of Byzantine nodes.
+ *
+ * Phases:
+ *  - SEND(m):  origin -> all
+ *  - ECHO(m):  on first valid SEND(m), everyone sends ECHO(m) to all
+ *  - READY(m): on > (N+f)/2 matching ECHOs OR on f+1 matching READYs, send READY(m) to all (only once)
+ *  - deliver(m): on 2f+1 matching READYs
+ */
 public class ByzantineReliableBroadcastProtocol
         implements BroadcastProviderBabelProtocol, MembershipConsumerBabelProtocol, SignedMessageBabelProtocol {
-    private static final Logger LOGGER = LogManager.getLogger(ByzantineConsistentBroadcastProtocol.class);
+    private static final Logger LOGGER = LogManager.getLogger(ByzantineReliableBroadcastProtocol.class);
     public static final int DEFAULT_EXPECTED_MESSAGES = 20;
     public static final int DEFAULT_EXPECTED_NEIGHBORS = 4;
     public static final int DEFAULT_F_NODES = 1;
 
+    private final int f;
+
+    // Message ids for which this node already sent echo (at most once).
+    private final Set<UUID> sentEcho;
+
+    // Message ids for which this node already sent ready (at most once).
+    private final Set<UUID> sentReady;
+
+    // Message ids for which this node already delivered (at most once).
     private final Set<UUID> delivered;
-    private final Map<UUID, Set<EchoEntry>> echos;
-    private final Map<UUID, Set<EchoEntry>> readys;
+
+    private final Map<UUID, Map<BabelNode, BroadcastMessage>> echos;
+    private final Map<UUID, Map<BabelNode, BroadcastMessage>> readys;
+
     private final Set<BabelNode> neighbors;
 
     /**
@@ -46,9 +66,12 @@ public class ByzantineReliableBroadcastProtocol
     }
 
     public ByzantineReliableBroadcastProtocol(int expectedMessages, int expectedNeighbors, int fNodes) {
+        this.f = fNodes;
+        sentEcho = new HashSet<>(expectedMessages);
+        sentReady = new HashSet<>(expectedMessages);
         delivered = Collections.newSetFromMap(HashMap.newHashMap(expectedMessages));
-        echos = new HashMap<UUID, Set<EchoEntry>>();
-        readys = new HashMap<UUID, Set<EchoEntry>>();
+        echos = new HashMap<>(expectedMessages);
+        readys = new HashMap<>(expectedMessages);
         neighbors = Collections.newSetFromMap(HashMap.newHashMap(expectedNeighbors));
     }
 
@@ -57,77 +80,126 @@ public class ByzantineReliableBroadcastProtocol
         this.channel = channel;
     }
 
-    /**
-     * Redirect it to uponBroadcastMessage
-     *
-     * @param message
-     * @param sender
-     */
-    @UponSignedMessageIn
-    public void uponEchoBroadcastMessage(SignedBabelMessage<EchoBroadcastMessage> message, BabelNode sender) {
-        LOGGER.info("New echo message {} from {}, retransmitting it...", message.innerMessage(), sender);
-        UUID mid = message.innerMessage().message().innerMessage().id();
-        BabelNode p = sender;
-        BabelMessage m = message.innerMessage().message();
-        EchoEntry dummyEntry = new EchoEntry(p, m);
-
-        echos.putIfAbsent(mid, new HashSet<>());
-        if (echos.get(mid).stream().noneMatch(entry -> entry.compare(dummyEntry))) {
-            echos.get(mid).add(new EchoEntry(p, m));
-        }
-        checkIfCanDeliver(mid, message);
+    private int n() {
+        return neighbors.size() + 1;
     }
 
-    /**
-     * Check if this broadcast message has been seen and retransmit it if it has
-     * not.
-     *
-     * @param message
-     * @param sender
-     */
+    private int echoQuorum() {
+        return (n() + f) / 2 + 1;
+    }
+
+    private int readyQuorum() {
+        return f + 1;
+    }
+
+    private int deliverQuorum() {
+        return 2 * f + 1;
+    }
+
     @UponSignedMessageIn
     public void uponBroadcastMessage(SignedBabelMessage<BroadcastMessage> message, BabelNode sender) {
-        UUID mid = message.innerMessage().id();
-        //if (echos.putIfAbsent(mid, Set.of(sender)) == null) {
-        if (echos.putIfAbsent(mid, Set.of()) == null) {
-            echos.get(mid).add(new EchoEntry(sender, message.innerMessage()));
-            LOGGER.info("New message {} from {}, retransmitting it...", message.innerMessage(), sender);
-            // We need to encapsulate the BroadcastMessage in a new SignedBabelMessage so
-            // that the channel generates a new signature
-            var broadcastMessage = new SignedBabelMessage<>(new EchoBroadcastMessage(message));
-            sendToEveryone(broadcastMessage);
-        }
-    }
-
-    // TODO simples é só meter nos args deste metodo a mensagem e verificar os contents e apagar o último for deste método
-    private void checkIfCanDeliver(UUID mid, SignedBabelMessage<EchoBroadcastMessage> message) {
-        Set<EchoEntry> entries = echos.get(mid);
-        if (entries == null || echos.get(mid)!=null) {
+        BroadcastMessage bm = message.innerMessage();
+        if (!sender.equals(bm.origin())) {
+            LOGGER.warn("Ignoring SEND {} from {}: sender is not the origin {}", bm, sender, bm.origin());
             return;
         }
-        HashMap<BabelMessage, Integer> counts = new HashMap<>();
-        for (EchoEntry entry : entries) {
-            BabelMessage msg = entry.m();
-            counts.put(msg, counts.getOrDefault(msg, 0) + 1);
+        if (delivered.contains(bm.id())) {
+            return;
         }
-        int quorum = (2 * DEFAULT_F_NODES) + 1;
-        for (Map.Entry<BabelMessage, Integer> countEntry : counts.entrySet()) {
-            if (countEntry.getValue() >= quorum) {
-                BabelMessage matchMessage = countEntry.getKey();
-                delivered.add(mid);
-                BabelNode originalSender = echos.get(mid);
-                this.deliverMessage(runtime, matchMessage, originalSender);
-                break;
-            }
+        LOGGER.info("New SEND {} from {}", bm, sender);
+        sendEcho(message);
+    }
+
+    @UponSignedMessageIn
+    public void uponEchoBroadcastMessage(SignedBabelMessage<EchoBroadcastMessage> message, BabelNode sender) {
+        SignedBabelMessage<BroadcastMessage> original = message.innerMessage().message();
+        BroadcastMessage bm = original.innerMessage();
+        UUID mid = bm.id();
+        if (delivered.contains(mid)) {
+            return;
         }
+        LOGGER.info("ECHO for {} from {}", bm, sender);
+        recordVote(echos, mid, sender, bm);
+        checkEchoQuorum(original);
+    }
+
+    @UponSignedMessageIn
+    public void uponReadyBroadcastMessage(SignedBabelMessage<ReadyBroadcastMessage> message, BabelNode sender) {
+        SignedBabelMessage<BroadcastMessage> original = message.innerMessage().message();
+        BroadcastMessage bm = original.innerMessage();
+        UUID mid = bm.id();
+        if (delivered.contains(mid)) {
+            return;
+        }
+        LOGGER.info("READY for {} from {}", bm, sender);
+        recordVote(readys, mid, sender, bm);
+        checkReadyQuorums(original);
     }
 
     @Override
     public void uponBroadcastRequest(BabelMessage message) {
         LOGGER.info("Broadcast request for {}... sending to current membership", message);
-        var broadcastMessage = new SignedBabelMessage<>(
+        var signed = new SignedBabelMessage<>(
                 new BroadcastMessage(UUID.randomUUID(), runtime.getMyself(), message));
-        sendToEveryone(broadcastMessage);
+        sendToEveryone(signed);
+        sendEcho(signed);
+    }
+
+    private void sendEcho(SignedBabelMessage<BroadcastMessage> original) {
+        BroadcastMessage bm = original.innerMessage();
+        UUID mid = bm.id();
+        if (!sentEcho.add(mid)) {
+            return;
+        }
+        LOGGER.info("Sending ECHO for {}", bm);
+        recordVote(echos, mid, runtime.getMyself(), bm);
+        sendToEveryone(new SignedBabelMessage<>(new EchoBroadcastMessage(original)));
+        checkEchoQuorum(original);
+    }
+
+    private void sendReady(SignedBabelMessage<BroadcastMessage> original) {
+        BroadcastMessage bm = original.innerMessage();
+        UUID mid = bm.id();
+        if (!sentReady.add(mid)) {
+            return;
+        }
+        LOGGER.info("Sending READY for {}", bm);
+        recordVote(readys, mid, runtime.getMyself(), bm);
+        sendToEveryone(new SignedBabelMessage<>(new ReadyBroadcastMessage(original)));
+        checkReadyQuorums(original);
+    }
+
+    private void checkEchoQuorum(SignedBabelMessage<BroadcastMessage> original) {
+        BroadcastMessage bm = original.innerMessage();
+        if (count(echos, bm.id(), bm) >= echoQuorum()) {
+            sendReady(original);
+        }
+    }
+
+    // f+1 readys => send READY; 2f+1 readys => deliver.
+    private void checkReadyQuorums(SignedBabelMessage<BroadcastMessage> original) {
+        BroadcastMessage bm = original.innerMessage();
+        UUID mid = bm.id();
+        long c = count(readys, mid, bm);
+
+        if (c >= readyQuorum()) {
+            sendReady(original); // no-op if already sent
+        }
+        // Recount: sendReady above may have added my own vote
+        c = count(readys, mid, bm);
+        if (c >= deliverQuorum() && delivered.add(mid)) {
+            LOGGER.info("Delivering {}", bm);
+            this.deliverMessage(runtime, bm.payload(), bm.origin());
+        }
+    }
+
+    private void recordVote(Map<UUID, Map<BabelNode, BroadcastMessage>> votes,
+                            UUID mid, BabelNode from, BroadcastMessage m) {
+        votes.computeIfAbsent(mid, k -> new HashMap<>()).putIfAbsent(from, m);
+    }
+
+    private long count(Map<UUID, Map<BabelNode, BroadcastMessage>> votes, UUID mid, BroadcastMessage m) {
+        return votes.getOrDefault(mid, Map.of()).values().stream().filter(m::equals).count();
     }
 
     @Override
