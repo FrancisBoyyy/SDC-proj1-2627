@@ -7,6 +7,7 @@ import java.security.KeyPairGenerator;
 import java.util.List;
 import java.util.UUID;
 
+import blockchain.Block;
 import org.junit.jupiter.api.Test;
 
 import broadcast.messages.SendBroadcastMessage;
@@ -40,7 +41,8 @@ class SerializationTest {
                 new BalanceReply(id, "shared1", true, 1000, 3),
                 new HistoryRequest(id, "client1", 5),
                 new HistoryReply(id, "client1", 0, 1, List.of(t)),
-                new SendBroadcastMessage(id, new PublicKeyBabelNode(keys.getPublic()), new TransferRequest(id, t)));
+                new SendBroadcastMessage(id, new PublicKeyBabelNode(keys.getPublic()), new TransferRequest(id, t)),
+                new Block(Block.genesis().hash(), 1, List.of(t), 42));
 
         for (BabelMessage message : messages) {
             assertEquals(message, roundTrip(message), message.getClass().getSimpleName());
