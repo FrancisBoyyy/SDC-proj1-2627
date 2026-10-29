@@ -16,5 +16,5 @@ import pt.unl.fct.di.novasys.babel2.core.BabelNode;
 // SortedSet) (deserialized messages from the network will be constructed with immutable versions of the collections),
 // or BabelMessage with a registered serializer (such as the payload below).
 @BabelIPMessage(id = 200)
-public record BroadcastMessage(UUID id, BabelNode origin, BabelMessage payload) implements BabelMessage {
+public record SendBroadcastMessage(UUID id, BabelNode origin, BabelMessage payload) implements BabelMessage {
 }

@@ -1,54 +1,39 @@
 package broadcast;
 
-import broadcast.messages.BroadcastMessage;
+import broadcast.messages.SendBroadcastMessage;
 import broadcast.messages.EchoBroadcastMessage;
 import broadcast.messages.ReadyBroadcastMessage;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import pt.unl.fct.di.novasys.babel2.annotations.UponMessageIn;
 import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 import pt.unl.fct.di.novasys.babel2.channels.ComposedBabelChannel;
-import pt.unl.fct.di.novasys.babel2.channels.SignedBabelMessage;
 import pt.unl.fct.di.novasys.babel2.core.Babel;
 import pt.unl.fct.di.novasys.babel2.core.BabelNode;
 import pt.unl.fct.di.novasys.babel2.core.broadcast.BroadcastProviderBabelProtocol;
 import pt.unl.fct.di.novasys.babel2.core.membership.MembershipConsumerBabelProtocol;
-import pt.unl.fct.di.novasys.babel2.core.signed.SignedMessageBabelProtocol;
-import pt.unl.fct.di.novasys.babel2.core.signed.annotations.UponSignedMessageIn;
 
 import java.util.*;
 
 /**
- * Assume N >= 3f + 1, where N = neighbors + 1 (this node included) and f is the maximum number of Byzantine nodes.
+ * Byzantine reliable broadcast over authenticated reliable links.
  *
- * Phases:
- *  - SEND(m):  origin -> all
- *  - ECHO(m):  on first valid SEND(m), everyone sends ECHO(m) to all
- *  - READY(m): on > (N+f)/2 matching ECHOs OR on f+1 matching READYs, send READY(m) to all (only once)
- *  - deliver(m): on 2f+1 matching READYs
+ * Payloads must have content-based equals/hashCode and must not be
+ * mutated after submission.
  */
 public class ByzantineReliableBroadcastProtocol
-        implements BroadcastProviderBabelProtocol, MembershipConsumerBabelProtocol, SignedMessageBabelProtocol {
+        implements BroadcastProviderBabelProtocol, MembershipConsumerBabelProtocol {
     private static final Logger LOGGER = LogManager.getLogger(ByzantineReliableBroadcastProtocol.class);
-    public static final int DEFAULT_EXPECTED_MESSAGES = 20;
-    public static final int DEFAULT_EXPECTED_NEIGHBORS = 4;
-    public static final int DEFAULT_F_NODES = 1;
 
-    private final int f;
+    private final Set<BabelNode> members;
 
-    // Message ids for which this node already sent echo (at most once).
-    private final Set<UUID> sentEcho;
+    private final int echoQuorum;
+    private final int readyQuorum;
+    private final int deliveryQuorum;
 
-    // Message ids for which this node already sent ready (at most once).
-    private final Set<UUID> sentReady;
-
-    // Message ids for which this node already delivered (at most once).
-    private final Set<UUID> delivered;
-
-    private final Map<UUID, Map<BabelNode, BroadcastMessage>> echos;
-    private final Map<UUID, Map<BabelNode, BroadcastMessage>> readys;
-
-    private final Set<BabelNode> neighbors;
+    private final Set<BabelNode> neighbors = new HashSet<>();
+    private final Map<BroadcastInstanceId, BroadcastState> instances = new HashMap<>();
 
     /**
      * Relevant objects to communicate with the Babel 2 framework.
@@ -61,161 +46,170 @@ public class ByzantineReliableBroadcastProtocol
     private Babel runtime;
     private BabelChannel channel;
 
-    public ByzantineReliableBroadcastProtocol() {
-        this(DEFAULT_EXPECTED_MESSAGES, DEFAULT_EXPECTED_NEIGHBORS, DEFAULT_F_NODES);
+    public ByzantineReliableBroadcastProtocol(List<BabelNode> membership, int f) {
+        members = Set.copyOf(membership);
+
+        if (members.isEmpty()
+                || members.size() != membership.size()
+                || f < 0
+                || members.size() < 3 * f + 1) {
+            throw new IllegalArgumentException(
+                    "Require distinct replicas, f >= 0, and n >= 3f + 1");
+        }
+
+        echoQuorum = ((members.size() +  f) / 2 + 1);
+        readyQuorum = f + 1;
+        deliveryQuorum = 2 * f + 1;
     }
 
-    public ByzantineReliableBroadcastProtocol(int expectedMessages, int expectedNeighbors, int fNodes) {
-        this.f = fNodes;
-        sentEcho = new HashSet<>(expectedMessages);
-        sentReady = new HashSet<>(expectedMessages);
-        delivered = Collections.newSetFromMap(HashMap.newHashMap(expectedMessages));
-        echos = new HashMap<>(expectedMessages);
-        readys = new HashMap<>(expectedMessages);
-        neighbors = Collections.newSetFromMap(HashMap.newHashMap(expectedNeighbors));
-    }
-
+    @Override
     public void init(Babel runtime, ComposedBabelChannel channel) {
+        if (!members.contains(runtime.getMyself())) {
+            throw new IllegalStateException(
+                    "This process is not a configured replica");
+        }
         this.runtime = runtime;
         this.channel = channel;
     }
 
-    private int n() {
-        return neighbors.size() + 1;
-    }
-
-    private int echoQuorum() {
-        return (n() + f) / 2 + 1;
-    }
-
-    private int readyQuorum() {
-        return f + 1;
-    }
-
-    private int deliverQuorum() {
-        return 2 * f + 1;
-    }
-
-    @UponSignedMessageIn
-    public void uponBroadcastMessage(SignedBabelMessage<BroadcastMessage> message, BabelNode sender) {
-        BroadcastMessage bm = message.innerMessage();
-        if (!sender.equals(bm.origin())) {
-            LOGGER.warn("Ignoring SEND {} from {}: sender is not the origin {}", bm, sender, bm.origin());
-            return;
-        }
-        if (delivered.contains(bm.id())) {
-            return;
-        }
-        LOGGER.info("New SEND {} from {}", bm, sender);
-        sendEcho(message);
-    }
-
-    @UponSignedMessageIn
-    public void uponEchoBroadcastMessage(SignedBabelMessage<EchoBroadcastMessage> message, BabelNode sender) {
-        SignedBabelMessage<BroadcastMessage> original = message.innerMessage().message();
-        BroadcastMessage bm = original.innerMessage();
-        UUID mid = bm.id();
-        if (delivered.contains(mid)) {
-            return;
-        }
-        LOGGER.info("ECHO for {} from {}", bm, sender);
-        recordVote(echos, mid, sender, bm);
-        checkEchoQuorum(original);
-    }
-
-    @UponSignedMessageIn
-    public void uponReadyBroadcastMessage(SignedBabelMessage<ReadyBroadcastMessage> message, BabelNode sender) {
-        SignedBabelMessage<BroadcastMessage> original = message.innerMessage().message();
-        BroadcastMessage bm = original.innerMessage();
-        UUID mid = bm.id();
-        if (delivered.contains(mid)) {
-            return;
-        }
-        LOGGER.info("READY for {} from {}", bm, sender);
-        recordVote(readys, mid, sender, bm);
-        checkReadyQuorums(original);
-    }
-
     @Override
-    public void uponBroadcastRequest(BabelMessage message) {
-        LOGGER.info("Broadcast request for {}... sending to current membership", message);
-        var signed = new SignedBabelMessage<>(
-                new BroadcastMessage(UUID.randomUUID(), runtime.getMyself(), message));
-        sendToEveryone(signed);
-        sendEcho(signed);
+    public void uponBroadcastRequest(BabelMessage payload) {
+        LOGGER.info("Broadcast request for {}... sending to current membership", payload);
+        var message = new SendBroadcastMessage(
+                UUID.randomUUID(), runtime.getMyself(), payload);
+
+        var state = stateFor(message);
+        state.send = message;
+
+        sendToNeighbors(message);
+        sendEcho(state, message);
     }
 
-    private void sendEcho(SignedBabelMessage<BroadcastMessage> original) {
-        BroadcastMessage bm = original.innerMessage();
-        UUID mid = bm.id();
-        if (!sentEcho.add(mid)) {
+    @UponMessageIn
+    public void uponSend(SendBroadcastMessage message, BabelNode sender) {
+        if (!accept(message, sender)
+                || !sender.equals(message.origin())) {
             return;
         }
-        LOGGER.info("Sending ECHO for {}", bm);
-        recordVote(echos, mid, runtime.getMyself(), bm);
-        sendToEveryone(new SignedBabelMessage<>(new EchoBroadcastMessage(original)));
-        checkEchoQuorum(original);
+
+        var state = stateFor(message);
+        if (!state.delivered) {
+            sendEcho(state, message);
+        }
     }
 
-    private void sendReady(SignedBabelMessage<BroadcastMessage> original) {
-        BroadcastMessage bm = original.innerMessage();
-        UUID mid = bm.id();
-        if (!sentReady.add(mid)) {
+    @UponMessageIn
+    public void uponEcho(EchoBroadcastMessage echo, BabelNode sender) {
+        var message = echo.message();
+        if (!accept(message, sender))
             return;
-        }
-        LOGGER.info("Sending READY for {}", bm);
-        recordVote(readys, mid, runtime.getMyself(), bm);
-        sendToEveryone(new SignedBabelMessage<>(new ReadyBroadcastMessage(original)));
-        checkReadyQuorums(original);
+
+        var state = stateFor(message);
+        if (state.delivered)
+            return;
+
+        if (state.echoes.putIfAbsent(sender, message) == null)
+            advance(state, message);
     }
 
-    private void checkEchoQuorum(SignedBabelMessage<BroadcastMessage> original) {
-        BroadcastMessage bm = original.innerMessage();
-        if (count(echos, bm.id(), bm) >= echoQuorum()) {
-            sendReady(original);
-        }
+    @UponMessageIn
+    public void uponReady(ReadyBroadcastMessage ready, BabelNode sender) {
+        var message = ready.message();
+        if (!accept(message, sender))
+            return;
+
+        var state = stateFor(message);
+        if (state.delivered)
+            return;
+
+        if (state.readies.putIfAbsent(sender, message) == null)
+            advance(state, message);
     }
 
-    // f+1 readys => send READY; 2f+1 readys => deliver.
-    private void checkReadyQuorums(SignedBabelMessage<BroadcastMessage> original) {
-        BroadcastMessage bm = original.innerMessage();
-        UUID mid = bm.id();
-        long c = count(readys, mid, bm);
-
-        if (c >= readyQuorum()) {
-            sendReady(original); // no-op if already sent
-        }
-        // Recount: sendReady above may have added my own vote
-        c = count(readys, mid, bm);
-        if (c >= deliverQuorum() && delivered.add(mid)) {
-            LOGGER.info("Delivering {}", bm);
-            this.deliverMessage(runtime, bm.payload(), bm.origin());
-        }
+    private boolean accept(SendBroadcastMessage message, BabelNode sender) {
+        return members.contains(sender)
+                && message != null
+                && message.id() != null
+                && message.origin() != null
+                && members.contains(message.origin())
+                && message.payload() != null;
     }
 
-    private void recordVote(Map<UUID, Map<BabelNode, BroadcastMessage>> votes,
-                            UUID mid, BabelNode from, BroadcastMessage m) {
-        votes.computeIfAbsent(mid, k -> new HashMap<>()).putIfAbsent(from, m);
+    private BroadcastState stateFor(SendBroadcastMessage message) {
+        var id = new BroadcastInstanceId(message.origin(), message.id());
+        return instances.computeIfAbsent(id, ignored -> new BroadcastState());
     }
 
-    private long count(Map<UUID, Map<BabelNode, BroadcastMessage>> votes, UUID mid, BroadcastMessage m) {
-        return votes.getOrDefault(mid, Map.of()).values().stream().filter(m::equals).count();
+    private void sendEcho(BroadcastState state, SendBroadcastMessage message) {
+        if (state.echo != null)
+            return;
+
+        state.echo = message;
+        state.echoes.put(runtime.getMyself(), message);
+
+        LOGGER.info("Sending ECHO for {}", message);
+        sendToNeighbors(new EchoBroadcastMessage(message));
+        advance(state, message);
+    }
+
+    /**
+     * Whenever a message gets a ECHO or READY vote this method is
+     * called to advance the Broadcast State.
+     * @param state Broadcast state
+     * @param candidate message who got a vote
+     */
+    private void advance(BroadcastState state, SendBroadcastMessage candidate) {
+        long echoes = BroadcastState.count(state.echoes, candidate);
+        long readies = BroadcastState.count(state.readies, candidate);
+
+        if (state.ready == null && (echoes >= echoQuorum || readies >= readyQuorum)) {
+            state.ready = candidate;
+            state.readies.put(runtime.getMyself(), candidate);
+            LOGGER.info("Sending READY for {}", candidate);
+            sendToNeighbors(new ReadyBroadcastMessage(candidate));
+        }
+
+        // Our own READY may have increased this count.
+        readies = BroadcastState.count(state.readies, candidate);
+
+        if (!state.delivered && readies >= deliveryQuorum) {
+            state.delivered = true;
+            LOGGER.info("Delivering {}", candidate);
+            deliverMessage(runtime, candidate.payload(), candidate.origin());
+        }
     }
 
     @Override
     public void neighbourUp(BabelNode node) {
+        if (!members.contains(node)
+                || node.equals(runtime.getMyself())
+                || !neighbors.add(node)) {
+            return;
+        }
+
+        // A peer may connect after we emitted one or more phases, retransmit
+        for (var state : instances.values()) {
+            var send = state.send;
+            var echo = state.echo;
+            var ready = state.ready;
+
+            if (send != null) channel.send(node, send);
+            if (echo != null) channel.send(node, new EchoBroadcastMessage(echo));
+            if (ready != null) channel.send(node, new ReadyBroadcastMessage(ready));
+
+        }
+
         LOGGER.info("NEIGHBOR UP: {}", node);
-        this.neighbors.add(node);
     }
 
     @Override
     public void neighbourDown(BabelNode babelNode) {
-        LOGGER.info("NEIGBOR DOWN: {}", babelNode);
-        this.neighbors.remove(babelNode);
+        LOGGER.info("NEIGHBOR DOWN: {}", babelNode);
+        neighbors.remove(babelNode);
     }
 
-    private void sendToEveryone(BabelMessage message) {
-        for (var neighbor : this.neighbors) {
+    private void sendToNeighbors(BabelMessage message) {
+        for (var neighbor : neighbors) {
             this.channel.send(neighbor, message);
         }
     }

@@ -9,7 +9,7 @@ import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 
-import broadcast.messages.BroadcastMessage;
+import broadcast.messages.SendBroadcastMessage;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
@@ -40,7 +40,7 @@ class SerializationTest {
                 new BalanceReply(id, "shared1", true, 1000, 3),
                 new HistoryRequest(id, "client1", 5),
                 new HistoryReply(id, "client1", 0, 1, List.of(t)),
-                new BroadcastMessage(id, new PublicKeyBabelNode(keys.getPublic()), new TransferRequest(id, t)));
+                new SendBroadcastMessage(id, new PublicKeyBabelNode(keys.getPublic()), new TransferRequest(id, t)));
 
         for (BabelMessage message : messages) {
             assertEquals(message, roundTrip(message), message.getClass().getSimpleName());

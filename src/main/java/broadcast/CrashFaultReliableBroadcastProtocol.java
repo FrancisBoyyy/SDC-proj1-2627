@@ -9,7 +9,7 @@ import java.util.UUID;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import broadcast.messages.BroadcastMessage;
+import broadcast.messages.SendBroadcastMessage;
 import pt.unl.fct.di.novasys.babel2.annotations.UponMessageIn;
 import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
@@ -72,7 +72,7 @@ public class CrashFaultReliableBroadcastProtocol
      */
     @Override
     public void uponBroadcastRequest(BabelMessage message) {
-        var broadcastMessage = new BroadcastMessage(UUID.randomUUID(), runtime.getMyself(), message);
+        var broadcastMessage = new SendBroadcastMessage(UUID.randomUUID(), runtime.getMyself(), message);
         LOGGER.debug("Broadcast request for {}... sending to current membership", message);
         delivered.add(broadcastMessage.id());
         this.deliverMessage(runtime, message, runtime.getMyself());
@@ -85,7 +85,7 @@ public class CrashFaultReliableBroadcastProtocol
      * correct process still gets the message).
      */
     @UponMessageIn
-    public void uponBroadcastMessage(BroadcastMessage message, BabelNode sender) {
+    public void uponBroadcastMessage(SendBroadcastMessage message, BabelNode sender) {
         if (!members.contains(sender)) {
             // Clients can also send messages to replicas: never trust them!
             LOGGER.warn("Ignoring broadcast message sent by {}, which is not a replica", sender);

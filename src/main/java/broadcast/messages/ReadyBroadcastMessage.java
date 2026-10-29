@@ -2,7 +2,6 @@ package broadcast.messages;
 
 import pt.unl.fct.di.novasys.babel2.channels.BabelIPMessage;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
-import pt.unl.fct.di.novasys.babel2.channels.SignedBabelMessage;
 
 // Messages only need to implement the BabelMessage interface. Additionally, we can also annotate with the BabelIPMessage
 // annotation to generate the serializer for us. If you use the annotation, the message MUST be a record.
@@ -16,7 +15,7 @@ import pt.unl.fct.di.novasys.babel2.channels.SignedBabelMessage;
 // BabelMessage with a registered serializer, or any other class that has a registered serializer. Do note that you
 // MUST write the serializers for other classes using the
 // BabelNetworkSerializer interface and annotate it with @AutoService(BabelNetworkSerializer.class)
-@BabelIPMessage(id = 4)
-public record ReadyBroadcastMessage(SignedBabelMessage<BroadcastMessage> message) implements BabelMessage {
+@BabelIPMessage(id = 202)
+public record ReadyBroadcastMessage(SendBroadcastMessage message) implements BabelMessage {
 
 }
