@@ -1,5 +1,6 @@
 import java.security.cert.CertificateException;
 
+import agreement.PracticalByzantineFaultTolerantProtocol;
 import app.PaymentService;
 import app.ledger.Ledger;
 import broadcast.ByzantineReliableBroadcastProtocol;
@@ -20,6 +21,7 @@ import pt.unl.fct.di.novasys.babel2.core.membership.MembershipProviderBabelProto
 import pt.unl.fct.di.novasys.babel2.core.membership.MembershipProviderExtensionFactory;
 import pt.unl.fct.di.novasys.babel2.utils.BabelPropertiesReader;
 import replication.BroadcastReplicationProtocol;
+import replication.StateMachineReplication;
 import utils.BabelIPComparator;
 import utils.Crypto;
 import utils.SystemConfiguration;
@@ -91,8 +93,8 @@ void main(String[] args) throws IOException, KeyStoreException,
 
     // The replication and dissemination/agreement protocols: replace these by
     // your own protocols.
-    var replicationProtocol = new BroadcastReplicationProtocol(ledger::isValid);
-    var broadcastProtocol = new ByzantineReliableBroadcastProtocol(membership, config.getF());
+    var replicationProtocol = new StateMachineReplication(ledger::isValid);
+    var broadcastProtocol = new PracticalByzantineFaultTolerantProtocol(membership, config.getF());
     var membershipProtocol = new StaticMembershipProtocol(membership,
             Long.parseLong(properties.getProperty("reconnect_interval", "1000")));
 
