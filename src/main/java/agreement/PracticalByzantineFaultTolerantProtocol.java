@@ -5,8 +5,10 @@ import agreement.events.Propose;
 import agreement.messages.CommitMessage;
 import agreement.messages.PrePrepareMessage;
 import agreement.messages.PrepareMessage;
+import agreement.messages.ProposeMsg;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.jspecify.annotations.Nullable;
 import pt.unl.fct.di.novasys.babel2.annotations.UponBabelEvent;
 import pt.unl.fct.di.novasys.babel2.annotations.UponMessageIn;
 import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
@@ -80,26 +82,42 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         return instances.computeIfAbsent(id, ignored -> new PBFTState());
     }
 
-    private void sendToNeighbors(BabelMessage message) {
+    private void sendToNeighbors(BabelMessage message, @Nullable BabelNode ignore) {
         for (BabelNode node : neighbors)
-            channel.send(node, message);
+            if (!node.equals(ignore))
+                channel.send(node, message);
     }
 
-    @UponBabelEvent
-    public void uponPropose(Propose propose) {
+    private void sendToNeighbors(BabelMessage message) {
+        sendToNeighbors(message, null);
+    }
+
+    private void processPropose(BabelMessage m) {
         //handle the propose, send the Pre-Prepare to all replicas containing the propose operation, a seqn,
         //  currentView and the hash of the propose.value
 
-        BabelMessage m = propose.value();
         String hash = PBFTState.operationDigest(m);
         currentSeqn++;
         PrePrepareMessage preprepareMsg = new PrePrepareMessage(m, currentView, currentSeqn, hash);
 
-        stateFor(preprepareMsg.view(), preprepareMsg.seqn());
+        PBFTState state = stateFor(preprepareMsg.view(), preprepareMsg.seqn());
+        state.setPrePrepared(m);
 
         LOGGER.info("Propose request for {}... sending to current membership with (v, n, d)({}, {}, {}). The hash is d=Hash({})",
-                propose, currentView, currentSeqn, hash, m.toString());
-        sendToNeighbors(preprepareMsg);
+                m, currentView, currentSeqn, hash, m.toString());
+        sendToNeighbors(preprepareMsg, runtime.getMyself());
+    }
+
+    @UponBabelEvent
+    public void uponPropose(Propose propose) {
+        LOGGER.info("Receive propose myself (primary)");
+        processPropose(propose.value());
+    }
+
+    @UponMessageIn
+    public void uponProposeMsg(ProposeMsg propose, BabelNode sender) {
+        LOGGER.info("Receive propose from replica {}", sender);
+        processPropose(propose.value());
     }
 
     @UponMessageIn

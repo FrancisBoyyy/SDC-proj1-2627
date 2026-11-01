@@ -2,11 +2,13 @@ package replication;
 
 import agreement.events.Decided;
 import agreement.events.Propose;
+import agreement.messages.ProposeMsg;
 import app.messages.Transfer;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import pt.unl.fct.di.novasys.babel2.annotations.UponBabelEvent;
+import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
 import pt.unl.fct.di.novasys.babel2.channels.ComposedBabelChannel;
 import pt.unl.fct.di.novasys.babel2.core.Babel;
 import pt.unl.fct.di.novasys.babel2.core.BabelNode;
@@ -15,6 +17,7 @@ import replication.events.ExecuteTransaction;
 import replication.events.SubmitTransaction;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
 
@@ -41,14 +44,22 @@ public class StateMachineReplication implements BabelProtocol {
     private long nextSeqn;
     private final Set<Transfer> pending; // pending operations to be executed
 
+    private BabelNode primary;
+
     private Babel runtime;
+    private BabelChannel channel;
 
     private final Predicate<Transfer> validTransfer;
 
-    public StateMachineReplication(Predicate<Transfer> validTransfer) {
+    public StateMachineReplication(List<BabelNode> membership, Predicate<Transfer> validTransfer) {
+        if (membership.isEmpty())
+            throw new IllegalArgumentException("Require a non-empty membership");
+
         this.submitted = new HashSet<>();
-        this.nextSeqn = 0L; // the first seqn conventioned to be executed
+        this.nextSeqn = 1L; // the first seqn conventioned to be executed
         this.pending = new HashSet<>();
+
+        this.primary = membership.getFirst(); // by convention!
 
         this.validTransfer = validTransfer;
     }
@@ -56,15 +67,21 @@ public class StateMachineReplication implements BabelProtocol {
     @Override
     public void init(Babel runtime, ComposedBabelChannel channel) {
         this.runtime = runtime;
+        this.channel = channel;
     }
 
     @UponBabelEvent
     public void uponSubmitTransaction(SubmitTransaction submit) {
         Transfer transfer = submit.transfer();
 
-        if (submitted.add(transfer.id())) {
-            LOGGER.info("Submitting transfer {}", transfer.id());
-            runtime.deliverEvent(new Propose(transfer));
+        if (runtime.getMyself().equals(primary)) {
+            if (submitted.add(transfer.id())) {
+                LOGGER.info("Submitting transfer {}", transfer.id());
+                runtime.deliverEvent(new Propose(transfer));
+            }
+
+        } else {
+            channel.send(primary, new ProposeMsg(transfer));
         }
     }
 
