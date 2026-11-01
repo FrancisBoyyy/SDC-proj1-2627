@@ -40,6 +40,10 @@ public class PBFTState {
 
     // getters and setters
 
+    public BabelMessage getOperation() {
+        return op;
+    }
+
     /**
      * The replica can accept a PrePrepare with the given hash if it did not
      * previously accept a PrePrepare with a different hash.
@@ -53,16 +57,8 @@ public class PBFTState {
         this.op =op;
     }
 
-    public boolean isPreparedState() {
-        return prepared;
-    }
-
     public void setPrepared() {
         prepared = true;
-    }
-
-    public boolean isCommitedState() {
-        return commited;
     }
 
     public void setCommited() {
@@ -77,8 +73,12 @@ public class PBFTState {
         prepares.putIfAbsent(from, msg);
     }
 
+    /**
+     * Only computes the size if it is in conditions to do so.
+     * If it is already on a posterior protocol phase, ignores it by returning 0
+     */
     public int getPrepareSize() {
-        if (!preprepared)
+        if (!preprepared || prepared)
             return 0;
 
         int count = 1; // already include the primary pre-prepare
@@ -94,8 +94,12 @@ public class PBFTState {
         commits.putIfAbsent(from, msg);
     }
 
+    /**
+     * Only computes the size if it is in conditions to do so.
+     * If it is already on a posterior protocol phase, ignores it by returning 0
+     */
     public int getCommitSize() {
-        if (!prepared)
+        if (!prepared || commited)
             return 0;
 
         int count = 0;

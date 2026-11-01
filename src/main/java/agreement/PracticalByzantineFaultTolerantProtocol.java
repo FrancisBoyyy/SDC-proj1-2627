@@ -1,5 +1,6 @@
 package agreement;
 
+import agreement.events.Decided;
 import agreement.events.Propose;
 import agreement.messages.CommitMessage;
 import agreement.messages.PrePrepareMessage;
@@ -9,6 +10,7 @@ import org.apache.logging.log4j.Logger;
 import pt.unl.fct.di.novasys.babel2.annotations.UponBabelEvent;
 import pt.unl.fct.di.novasys.babel2.annotations.UponMessageIn;
 import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
+import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 import pt.unl.fct.di.novasys.babel2.channels.ComposedBabelChannel;
 import pt.unl.fct.di.novasys.babel2.core.Babel;
 import pt.unl.fct.di.novasys.babel2.core.BabelNode;
@@ -27,7 +29,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     private final Map<PBFTInstanceId, PBFTState> instances;
 
-    private int currentView;
+    private int currentView; // TODO : viewChange
+    private int currentSeqn; // monotonic increasing sequence number, only for primary usage!
 
     /**
      * Relevant objects to communicate with the Babel 2 framework.
@@ -53,6 +56,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         this.instances = new HashMap<>();
 
         this.currentView = 0; // by convention!
+        this.currentSeqn = 0; // by convention!
     }
 
     @Override
@@ -65,18 +69,44 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         this.channel = channel;
     }
 
+    // aux methods
+
+    private BabelNode expectedPrimary() {
+        return neighbors.get(currentView % neighbors.size());
+    }
+
+    private PBFTState stateFor(long view, long seqn) {
+        PBFTInstanceId id = new PBFTInstanceId(view, seqn);
+        return instances.computeIfAbsent(id, ignored -> new PBFTState());
+    }
+
+    private void sendToNeighbors(BabelMessage message) {
+        for (BabelNode node : neighbors)
+            channel.send(node, message);
+    }
+
     @UponBabelEvent
     public void uponPropose(Propose propose) {
-        LOGGER.info("Propose request for {}... sending to current membership", propose);
-        // TODO: handle the propose, send the Pre-Prepare to all replicas containing the propose operation, a seqn,
+        //handle the propose, send the Pre-Prepare to all replicas containing the propose operation, a seqn,
         //  currentView and the hash of the propose.value
+
+        BabelMessage m = propose.value();
+        String hash = PBFTState.operationDigest(m);
+        currentSeqn++;
+        PrePrepareMessage preprepareMsg = new PrePrepareMessage(m, currentView, currentSeqn, hash);
+
+        stateFor(preprepareMsg.view(), preprepareMsg.seqn());
+
+        LOGGER.info("Propose request for {}... sending to current membership with (v, n, d)({}, {}, {}). The hash is d=Hash({})",
+                propose, currentView, currentSeqn, hash, m.toString());
+        sendToNeighbors(preprepareMsg);
     }
 
     @UponMessageIn
     public void uponPrePrepareMsg(PrePrepareMessage msg, BabelNode sender) {
         LOGGER.info("Pre-prepare received from {}", sender);
 
-        // TODO: verify the conditions for accepting that PrePrepare:
+        // verify the conditions for accepting that PrePrepare:
         // 1. the sender must be the primary with index in neighbors p = currentView % neighbors.size()
         // msg = operation, view, seqn and hash. Confirm that
         //   2.1 hash=Hash(operation),
@@ -84,26 +114,86 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         //   2.3 instances does not have the entry (view, seqn) with a PBFT state such that false=canAcceptPrePrepare(hash)
         //   2.4 seqn don't exhaust the number space
 
-        // TODO: setPrePrepared(msg.value)
-        // TODO: make the Prepare msg and send to all replicas (including itself and primary)
+        // 2.2
+        if (currentView != msg.view()) {
+            LOGGER.warn("currentView={} != msg.view={}", currentView, msg.view());
+            return;
+        }
+
+        // 1.
+        if (!sender.equals(expectedPrimary())) {
+            LOGGER.warn("sender={} is not the primary={}", sender, expectedPrimary());
+            return;
+        }
+
+        // 2.1
+        String expectedHash = PBFTState.operationDigest(msg.m());
+        if (!msg.hash().equals(expectedHash)) {
+            LOGGER.warn("msg.hash()={} != expectedHash={}", msg.hash(), expectedHash);
+            return;
+        }
+
+        // 2.3
+        PBFTState state = stateFor(msg.view(), msg.seqn());
+        if (!state.canAcceptPrePrepare(expectedHash)) {
+            LOGGER.warn("This replica previously accept a PrePrepare with a different hash.");
+            return;
+        }
+
+        // TODO: 2.4...
+
+        // all conditions verified -> accept the pre-prepare!
+        state.setPrePrepared(msg.m());
+
+        //  make the Prepare msg and send to all replicas (including itself and primary)
+        PrepareMessage prepare = new PrepareMessage(msg.view(), msg.seqn(), expectedHash);
+        LOGGER.info("Accepted PrePrepare -> Prepare {} sent to neighbors", prepare);
+        sendToNeighbors(prepare);
     }
 
     @UponMessageIn
     public void uponPrepareMsg(PrepareMessage msg, BabelNode sender) {
         LOGGER.info("Prepare received from {}", sender);
 
-        // TODO: registerPrepare(sender, msg)
-        // TODO: collect a majority quorum of prepares to transition to the PREPARED state that is setPrepared()
-        // TODO: broadcast COMMIT
+        // registerPrepare(sender, msg)
+        // collect a majority quorum of prepares to transition to the PREPARED state that is setPrepared()
+        // broadcast COMMIT
+
+        PBFTState state = stateFor(msg.view(), msg.seqn());
+        state.registerPrepare(sender, msg);
+
+        if (state.getPrepareSize() < prepareQuorum)
+            return;
+
+        // byzantine quorum reached -> prepared!
+        state.setPrepared();
+
+        //  make the Commit msg and send to all replicas
+        CommitMessage commit = new CommitMessage(msg.view(), msg.seqn(), msg.hash());
+        LOGGER.info("Byzantine quorum of Prepares reached -> Commit {} sent to neighbors", commit);
+        sendToNeighbors(commit);
     }
 
     @UponMessageIn
     public void uponCommitMsg(CommitMessage msg, BabelNode sender) {
         LOGGER.info("Commit received from {}", sender);
 
-        // TODO: registerCommit(sender, msg)
-        // TODO: collect a majority quorum of commits to transition to the COMMIT state that is setCommit()
+        // registerCommit(sender, msg)
+        // collect a majority quorum of commits to transition to the COMMIT state that is setCommit()
 
-        // TODO: send to the SMR the indication Decided with that seqn
+        // send to the SMR the indication Decided with that seqn
+
+        PBFTState state = stateFor(msg.view(), msg.seqn());
+        state.registerCommit(sender, msg);
+
+        if (state.getCommitSize() < commitQuorum)
+            return;
+
+        // byzantine quorum reached -> ready to commit!
+        state.setCommited();
+
+        Decided decided = new Decided(msg.seqn(), state.getOperation());
+        LOGGER.info("Byzantine quorum of Commits reached -> Decide {} indication sent to SMR", decided);
+        runtime.deliverEvent(decided);
     }
 }
