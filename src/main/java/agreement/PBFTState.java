@@ -6,12 +6,14 @@ import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 import pt.unl.fct.di.novasys.babel2.core.BabelNode;
 import utils.Crypto;
 
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 public class PBFTState {
 
-    private BabelMessage op;
+    private List<BabelMessage> batch;
 
     private boolean preprepared;
     private boolean prepared;
@@ -21,7 +23,7 @@ public class PBFTState {
     private final Map<BabelNode, CommitMessage> commits;
 
     public PBFTState() {
-        this.op = null;
+        this.batch = null;
 
         this.preprepared = false;
         this.prepared = false;
@@ -33,15 +35,16 @@ public class PBFTState {
 
     // aux methods
 
-    public static String operationDigest(BabelMessage operation) {
-        byte[] hashBytes = Crypto.digest(operation.toString().getBytes());
+    public static String operationDigest(List<BabelMessage> batch) {
+        String batchString = Arrays.toString(batch.toArray());
+        byte[] hashBytes = Crypto.digest(batchString.getBytes());
         return Crypto.toHex(hashBytes);
     }
 
     // getters and setters
 
-    public BabelMessage getOperation() {
-        return op;
+    public List<BabelMessage> getBatch() {
+        return batch;
     }
 
     /**
@@ -49,12 +52,12 @@ public class PBFTState {
      * previously accept a PrePrepare with a different hash.
      */
     public boolean canAcceptPrePrepare(String hash) {
-        return !preprepared || hash.equals(operationDigest(op));
+        return !preprepared || hash.equals(operationDigest(batch));
     }
 
-    public void setPrePrepared(BabelMessage op) {
+    public void setPrePrepared(List<BabelMessage> op) {
         preprepared = true;
-        this.op =op;
+        this.batch =op;
     }
 
     public void setPrepared() {
@@ -83,7 +86,7 @@ public class PBFTState {
 
         int count = 1; // already include the primary pre-prepare
         for (PrepareMessage msg : prepares.values()) {
-            if (msg.hash().equals(operationDigest(op)))
+            if (msg.hash().equals(operationDigest(batch)))
                 count++;
         }
 
@@ -104,7 +107,7 @@ public class PBFTState {
 
         int count = 0;
         for (CommitMessage msg : commits.values()) {
-            if (msg.hash().equals(operationDigest(op)))
+            if (msg.hash().equals(operationDigest(batch)))
                 count++;
         }
 

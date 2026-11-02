@@ -3,6 +3,8 @@ package agreement.messages;
 import pt.unl.fct.di.novasys.babel2.channels.BabelIPMessage;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 
+import java.util.List;
+
 @BabelIPMessage(id = 303)
-public record ProposeMsg(BabelMessage value) implements BabelMessage {
+public record ProposeMsg(List<BabelMessage> values) implements BabelMessage {
 }

@@ -92,32 +92,33 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         sendToNeighbors(message, null);
     }
 
-    private void processPropose(BabelMessage m) {
+    private void processPropose(List<BabelMessage> ms) {
         //handle the propose, send the Pre-Prepare to all replicas containing the propose operation, a seqn,
         //  currentView and the hash of the propose.value
 
-        String hash = PBFTState.operationDigest(m);
+        String hash = PBFTState.operationDigest(ms);
         currentSeqn++;
-        PrePrepareMessage preprepareMsg = new PrePrepareMessage(m, currentView, currentSeqn, hash);
+        PrePrepareMessage preprepareMsg = new PrePrepareMessage(ms, currentView, currentSeqn, hash);
 
         PBFTState state = stateFor(preprepareMsg.view(), preprepareMsg.seqn());
-        state.setPrePrepared(m);
+        state.setPrePrepared(ms);
 
-        LOGGER.info("Propose request for {}... sending to current membership with (v, n, d)({}, {}, {}). The hash is d=Hash({})",
-                m, currentView, currentSeqn, hash, m.toString());
+        String batchStr = Arrays.toString(ms.toArray());
+        LOGGER.info("Propose request for {}... sending to current membership with (v, n, d)=({}, {}, {})",
+                batchStr, currentView, currentSeqn, hash);
         sendToNeighbors(preprepareMsg, runtime.getMyself());
     }
 
     @UponBabelEvent
     public void uponPropose(Propose propose) {
         LOGGER.info("Receive propose myself (primary)");
-        processPropose(propose.value());
+        processPropose(propose.values());
     }
 
     @UponMessageIn
     public void uponProposeMsg(ProposeMsg propose, BabelNode sender) {
         LOGGER.info("Receive propose from replica {}", sender);
-        processPropose(propose.value());
+        processPropose(propose.values());
     }
 
     @UponMessageIn
@@ -145,7 +146,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         }
 
         // 2.1
-        String expectedHash = PBFTState.operationDigest(msg.m());
+        String expectedHash = PBFTState.operationDigest(msg.ms());
         if (!msg.hash().equals(expectedHash)) {
             LOGGER.warn("msg.hash()={} != expectedHash={}", msg.hash(), expectedHash);
             return;
@@ -161,7 +162,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         // TODO: 2.4...
 
         // all conditions verified -> accept the pre-prepare!
-        state.setPrePrepared(msg.m());
+        state.setPrePrepared(msg.ms());
 
         //  make the Prepare msg and send to all replicas (including itself and primary)
         PrepareMessage prepare = new PrepareMessage(msg.view(), msg.seqn(), expectedHash);
@@ -210,7 +211,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         // byzantine quorum reached -> ready to commit!
         state.setCommited();
 
-        Decided decided = new Decided(msg.seqn(), state.getOperation());
+        Decided decided = new Decided(msg.seqn(), state.getBatch());
         LOGGER.info("Byzantine quorum of Commits reached -> Decide {} indication sent to SMR", decided);
         runtime.deliverEvent(decided);
     }
