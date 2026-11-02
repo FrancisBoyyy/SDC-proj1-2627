@@ -14,6 +14,7 @@ import java.util.Map;
 public class PBFTState {
 
     private List<BabelMessage> batch;
+    private String digest;
 
     private boolean preprepared;
     private boolean prepared;
@@ -47,17 +48,22 @@ public class PBFTState {
         return batch;
     }
 
+    public String getDigest() {
+        return digest;
+    }
+
     /**
      * The replica can accept a PrePrepare with the given hash if it did not
      * previously accept a PrePrepare with a different hash.
      */
     public boolean canAcceptPrePrepare(String hash) {
-        return !preprepared || hash.equals(operationDigest(batch));
+        return !preprepared || hash.equals(digest);
     }
 
     public void setPrePrepared(List<BabelMessage> op) {
         preprepared = true;
         this.batch =op;
+        this.digest = operationDigest(op);
     }
 
     public void setPrepared() {
@@ -86,7 +92,7 @@ public class PBFTState {
 
         int count = 1; // already include the primary pre-prepare
         for (PrepareMessage msg : prepares.values()) {
-            if (msg.hash().equals(operationDigest(batch)))
+            if (msg.hash().equals(digest))
                 count++;
         }
 
@@ -107,7 +113,7 @@ public class PBFTState {
 
         int count = 0;
         for (CommitMessage msg : commits.values()) {
-            if (msg.hash().equals(operationDigest(batch)))
+            if (msg.hash().equals(digest))
                 count++;
         }
 

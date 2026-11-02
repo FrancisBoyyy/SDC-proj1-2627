@@ -88,8 +88,32 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
                 channel.send(node, message);
     }
 
-    private void sendToNeighbors(BabelMessage message) {
-        sendToNeighbors(message, null);
+    private void sendToOthers(BabelMessage m) {
+        sendToNeighbors(m, runtime.getMyself());
+    }
+
+    private void tryPrepared(PBFTState state, long view, long seqn) {
+        if (state.getPrepareSize() < prepareQuorum)
+            return;
+
+        state.setPrepared();
+
+        CommitMessage commit = new CommitMessage(view, seqn, state.getDigest());
+        LOGGER.info("Prepares quorum reached -> Commit {} sent", commit);
+        state.registerCommit(runtime.getMyself(), commit);   // own commit
+        sendToNeighbors(commit, null);
+
+        tryCommitted(state, seqn);   // commits may have arrived before we were prepared
+    }
+
+    private void tryCommitted(PBFTState state, long seqn) {
+        if (state.getCommitSize() < commitQuorum)
+            return;
+        state.setCommited();
+
+        Decided decided = new Decided(seqn, state.getBatch());
+        LOGGER.info("Commits quorum reached -> Decide {} sent to SMR", decided);
+        runtime.deliverEvent(decided);
     }
 
     private void processPropose(List<BabelMessage> ms) {
@@ -112,12 +136,6 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     @UponBabelEvent
     public void uponPropose(Propose propose) {
         LOGGER.info("Receive propose myself (primary)");
-        processPropose(propose.values());
-    }
-
-    @UponMessageIn
-    public void uponProposeMsg(ProposeMsg propose, BabelNode sender) {
-        LOGGER.info("Receive propose from replica {}", sender);
         processPropose(propose.values());
     }
 
@@ -164,55 +182,31 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         // all conditions verified -> accept the pre-prepare!
         state.setPrePrepared(msg.ms());
 
-        //  make the Prepare msg and send to all replicas (including itself and primary)
         PrepareMessage prepare = new PrepareMessage(msg.view(), msg.seqn(), expectedHash);
-        LOGGER.info("Accepted PrePrepare -> Prepare {} sent to neighbors", prepare);
-        sendToNeighbors(prepare);
+        LOGGER.info("Accepted PrePrepare -> Prepare {} sent", prepare);
+        state.registerPrepare(runtime.getMyself(), prepare);   // own prepare
+        sendToNeighbors(prepare, null);
+
+        tryPrepared(state, msg.view(), msg.seqn());            // other prepares may be buffered
     }
 
     @UponMessageIn
     public void uponPrepareMsg(PrepareMessage msg, BabelNode sender) {
-        LOGGER.info("Prepare received from {}", sender);
-
-        // registerPrepare(sender, msg)
-        // collect a majority quorum of prepares to transition to the PREPARED state that is setPrepared()
-        // broadcast COMMIT
+        if (!neighbors.contains(sender) || sender.equals(expectedPrimary()))
+            return;   // the primary's vote is its PrePrepare
 
         PBFTState state = stateFor(msg.view(), msg.seqn());
         state.registerPrepare(sender, msg);
-
-        if (state.getPrepareSize() < prepareQuorum)
-            return;
-
-        // byzantine quorum reached -> prepared!
-        state.setPrepared();
-
-        //  make the Commit msg and send to all replicas
-        CommitMessage commit = new CommitMessage(msg.view(), msg.seqn(), msg.hash());
-        LOGGER.info("Byzantine quorum of Prepares reached -> Commit {} sent to neighbors", commit);
-        sendToNeighbors(commit);
+        tryPrepared(state, msg.view(), msg.seqn());
     }
 
     @UponMessageIn
     public void uponCommitMsg(CommitMessage msg, BabelNode sender) {
-        LOGGER.info("Commit received from {}", sender);
-
-        // registerCommit(sender, msg)
-        // collect a majority quorum of commits to transition to the COMMIT state that is setCommit()
-
-        // send to the SMR the indication Decided with that seqn
+        if (!neighbors.contains(sender))
+            return;
 
         PBFTState state = stateFor(msg.view(), msg.seqn());
         state.registerCommit(sender, msg);
-
-        if (state.getCommitSize() < commitQuorum)
-            return;
-
-        // byzantine quorum reached -> ready to commit!
-        state.setCommited();
-
-        Decided decided = new Decided(msg.seqn(), state.getBatch());
-        LOGGER.info("Byzantine quorum of Commits reached -> Decide {} indication sent to SMR", decided);
-        runtime.deliverEvent(decided);
+        tryCommitted(state, msg.seqn());
     }
 }

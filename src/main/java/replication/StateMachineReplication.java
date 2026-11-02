@@ -7,7 +7,9 @@ import app.messages.Transfer;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import org.jspecify.annotations.Nullable;
 import pt.unl.fct.di.novasys.babel2.annotations.UponBabelEvent;
+import pt.unl.fct.di.novasys.babel2.annotations.UponMessageIn;
 import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 import pt.unl.fct.di.novasys.babel2.channels.ComposedBabelChannel;
@@ -18,6 +20,8 @@ import replication.events.ExecuteTransaction;
 import replication.events.SubmitTransaction;
 
 import java.util.*;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 /**
@@ -39,32 +43,29 @@ import java.util.function.Predicate;
 public class StateMachineReplication implements BabelProtocol {
     private static final Logger LOGGER = LogManager.getLogger(StateMachineReplication.class);
 
-    private final int batchSize;
+    private final SMRParameters params;
     private List<BabelMessage> currentBatch;
+    private @Nullable ScheduledFuture<?> batchTimer;
 
     private final Set<String> submitted; // already submitted operations to Agreement protocol
     private long nextSeqn;
-    private final List<DecidedTransferBatch> pending; // pending operations to be executed
-
+    private final TreeMap<Long, List<Transfer>> pending;
     private BabelNode primary;
 
     private Babel runtime;
     private BabelChannel channel;
 
     private final Predicate<Transfer> validTransfer;
-
-    // TODO: currentBatch operations
-
-    public StateMachineReplication(List<BabelNode> membership, Predicate<Transfer> validTransfer, int batchSize) {
+    public StateMachineReplication(List<BabelNode> membership, Predicate<Transfer> validTransfer, SMRParameters params) {
         if (membership.isEmpty())
             throw new IllegalArgumentException("Require a non-empty membership");
 
-        this.batchSize = batchSize;
+        this.params = params;
         this.currentBatch = new LinkedList<>();
 
         this.submitted = new HashSet<>();
         this.nextSeqn = 1L; // the first seqn conventioned to be executed
-        this.pending = new LinkedList<>();
+        this.pending = new TreeMap<>();
 
         this.primary = membership.getFirst(); // by convention!
 
@@ -75,76 +76,85 @@ public class StateMachineReplication implements BabelProtocol {
     public void init(Babel runtime, ComposedBabelChannel channel) {
         this.runtime = runtime;
         this.channel = channel;
+
+        this.batchTimer = null;
     }
 
     private record DecidedTransferBatch(List<Transfer> ms, long seqn) {}
 
     @UponBabelEvent
+    public void uponBatchTimer(BatchTimer timer) {
+        batchTimer = null;
+        submitCurrentBatch();
+    }
+
+    @UponBabelEvent
     public void uponSubmitTransaction(SubmitTransaction submit) {
         Transfer transfer = submit.transfer();
 
-        if (submitted.add(transfer.id())) {
-            LOGGER.info("Batching transfer {}", transfer.id());
-            currentBatch.add(transfer);
+        if (!runtime.getMyself().equals(primary)) {
+            LOGGER.info("Sending the transfer {} to primary {} because i am not the primary", transfer.id(), primary);
+            channel.send(primary, new ProposeMsg(transfer));
+            return;
         }
 
-        if (currentBatch.size() < batchSize)
+        // this replica is the primary
+        submitTransaction(transfer);
+    }
+
+    private void submitTransaction(Transfer transfer) {
+        if (submitted.add(transfer.id())) {
+            currentBatch.add(transfer);
+            if (currentBatch.size() == 1)
+                batchTimer = runtime.setUpTimer(new BatchTimer(), params.batchTimeout(), TimeUnit.MILLISECONDS);
+        }
+        if (currentBatch.size() >= params.batchSize())
+            submitCurrentBatch();
+    }
+
+    @UponMessageIn
+    public void uponProposeMsg(ProposeMsg propose, BabelNode sender) {
+        LOGGER.info("Receive propose from replica {}", sender);
+        submitTransaction(propose.value());
+    }
+
+    private void submitCurrentBatch() {
+        if (batchTimer != null) {
+            batchTimer.cancel(false);
+            batchTimer = null;
+        }
+
+        if (currentBatch.isEmpty())
             return;
 
-        LOGGER.info("Submitting currentBatch {}", nextSeqn);
-
-        List<BabelMessage> toPropose = new ArrayList<>(currentBatch);
-        if (runtime.getMyself().equals(primary))
-            runtime.deliverEvent(new Propose(toPropose));
-        else
-            channel.send(primary, new ProposeMsg(toPropose));
-
+        runtime.deliverEvent(new Propose(new ArrayList<>(currentBatch)));
         currentBatch.clear();
     }
 
     private void deliverPending() {
-        while (!pending.isEmpty()) {
-            DecidedTransferBatch toDeliver = pending.getFirst();
-            List<Transfer> transfers = toDeliver.ms();
-
-            if (toDeliver.seqn() == nextSeqn) {
-                for (Transfer transfer : transfers) {
-                    LOGGER.info("Catching up on transfer {}", transfer.id());
-                    runtime.deliverEvent(new ExecuteTransaction(transfer));
-                }
-
-                pending.removeFirst();
-                nextSeqn++;
-
-            } else
-                break;
+        List<Transfer> next;
+        while ((next = pending.remove(nextSeqn)) != null) {
+            next.forEach(t -> runtime.deliverEvent(new ExecuteTransaction(t)));
+            nextSeqn++;
         }
     }
 
     @UponBabelEvent
     public void uponDeliverTransfer(Decided decided) {
-        List<Transfer> batch = new ArrayList<>(batchSize);
+        if (decided.sqn() < nextSeqn)
+            return;
+
+        List<Transfer> batch = new ArrayList<>();
         for (BabelMessage m : decided.batch()) {
-            Transfer transfer = (Transfer) m;
+            Transfer t = (Transfer) m;
+            if (validTransfer.test(t))
+                batch.add(t);
 
-            if (!validTransfer.test(transfer)) {
-                LOGGER.warn("Ignoring invalid delivered transfer {} in currentBatch {}", transfer.id(), decided.sqn());
-                continue;
-            }
-
-            batch.add(transfer);
+            else
+                LOGGER.warn("Ignoring invalid transfer {} in batch {}", t.id(), decided.sqn());
         }
 
-        if (decided.sqn() == nextSeqn) {
-            LOGGER.info("Delivering transfers in currentBatch seqn={}", decided.sqn());
-            batch.forEach(transfer -> runtime.deliverEvent(new ExecuteTransaction(transfer)));
-            nextSeqn++;
-
-            deliverPending();
-
-        } else {
-            LOGGER.warn("Hole detected! Adding currentBatch seqn={} to pending", decided.sqn());
-            pending.add(new DecidedTransferBatch(batch, decided.sqn()));
-        }
+        pending.putIfAbsent(decided.sqn(), batch);
+        deliverPending();
     }
 }
