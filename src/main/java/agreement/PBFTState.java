@@ -1,7 +1,6 @@
 package agreement;
 
-import agreement.messages.CommitMessage;
-import agreement.messages.PrepareMessage;
+import agreement.messages.*;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 import pt.unl.fct.di.novasys.babel2.core.BabelNode;
 import utils.Crypto;
@@ -20,7 +19,8 @@ public class PBFTState {
     private boolean prepared;
     private boolean commited;
 
-    private final Map<BabelNode, PrepareMessage> prepares;
+    private SignedProof signedPrePrepare;
+    private final Map<BabelNode, SignedProof> prepares;
     private final Map<BabelNode, CommitMessage> commits;
 
     public PBFTState() {
@@ -30,6 +30,7 @@ public class PBFTState {
         this.prepared = false;
         this.commited = false;
 
+        this.signedPrePrepare = null;
         this.prepares = new HashMap<>();
         this.commits = new HashMap<>();
     }
@@ -60,10 +61,12 @@ public class PBFTState {
         return !preprepared || hash.equals(digest);
     }
 
-    public void setPrePrepared(List<BabelMessage> op) {
+    public void setPrePrepared(PrePrepareMessage msg, BabelNode primary) {
         preprepared = true;
-        this.batch =op;
-        this.digest = operationDigest(op);
+        this.batch =msg.ms();
+        this.digest = operationDigest(msg.ms());
+
+        signedPrePrepare = new SignedProof(msg, primary);
     }
 
     public void setPrepared() {
@@ -79,7 +82,8 @@ public class PBFTState {
      * This operation occurs at most once per process.
      */
     public void registerPrepare(BabelNode from, PrepareMessage msg) {
-        prepares.putIfAbsent(from, msg);
+        prepares.putIfAbsent(from,
+                new SignedProof(msg, from));
     }
 
     /**
@@ -91,12 +95,19 @@ public class PBFTState {
             return 0;
 
         int count = 1; // already include the primary pre-prepare
-        for (PrepareMessage msg : prepares.values()) {
-            if (msg.hash().equals(digest))
+        for (SignedProof proof : prepares.values()) {
+            if (proof.digest().equals(digest))
                 count++;
         }
 
         return count;
+    }
+
+    public PreparedProof getProof() {
+        return new PreparedProof(
+                signedPrePrepare,
+                prepares.values().stream().toList()
+        );
     }
 
     public void registerCommit(BabelNode from, CommitMessage msg) {

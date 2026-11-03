@@ -8,6 +8,8 @@ import agreement.messages.PrePrepareMessage;
 import agreement.messages.PrepareMessage;
 import agreement.messages.ViewChangeMsg;
 import agreement.timers.ViewChangeTimer;
+import agreement.messages.SignedProof;
+import agreement.messages.PreparedProof;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jspecify.annotations.Nullable;
@@ -26,6 +28,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.*;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
@@ -35,6 +38,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     private final int prepareQuorum;
     private final int commitQuorum;
+    private final int newViewQuorum;
+    private final int amplificationQuorum;
 
     private final Map<PBFTInstanceId, PBFTState> instances;
 
@@ -43,7 +48,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     private boolean inViewChange;
     private long pendingView; // the view wanted to move to
-    private final Map<Integer, Map<BabelNode, ViewChangeMsg>> viewChanges;
+    private final Map<Long, Map<BabelNode, ViewChangeMsg>> viewChanges;
     private @Nullable ScheduledFuture<?> viewChangeTimer;
     private final Set<Long> decidedSeqns; // to not emit Decided twice!
 
@@ -67,6 +72,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         this.prepareQuorum = 2*f + 1; // the implementation includes the primary in the quorum threshold
         this.commitQuorum = 2*f + 1;
+        this.newViewQuorum = 2*f + 1;
+        this.amplificationQuorum = f + 1;
 
         this.instances = new HashMap<>();
 
@@ -105,8 +112,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     // aux methods
 
-    private BabelNode expectedPrimary() {
-        return neighbors.get(Math.floorMod(currentView, neighbors.size()));
+    private BabelNode expectedPrimary(long view) {
+        return neighbors.get(Math.floorMod(view, neighbors.size()));
     }
 
     private PBFTState stateFor(long view, long seqn) {
@@ -160,7 +167,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         PrePrepareMessage preprepareMsg = new PrePrepareMessage(ms, currentView, currentSeqn, hash, sig);
 
         PBFTState state = stateFor(preprepareMsg.view(), preprepareMsg.seqn());
-        state.setPrePrepared(ms);
+        state.setPrePrepared(preprepareMsg, runtime.getMyself());
 
         String batchStr = Arrays.toString(ms.toArray());
         LOGGER.info("Propose request for {}... sending to current membership with (v, n, d)=({}, {}, {})",
@@ -193,8 +200,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         }
 
         // 1.
-        if (!sender.equals(expectedPrimary())) {
-            LOGGER.warn("sender={} is not the primary={}", sender, expectedPrimary());
+        if (!sender.equals(expectedPrimary(currentView))) {
+            LOGGER.warn("sender={} is not the primary={}", sender, expectedPrimary(currentView));
             return;
         }
 
@@ -222,7 +229,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             return;
 
         // all conditions verified -> accept the pre-prepare!
-        state.setPrePrepared(msg.ms());
+        state.setPrePrepared(msg, sender);
 
         byte[] sig = Crypto.sign(prepareBytes(msg.view(), msg.seqn(), expectedHash), runtime.getKeys().getPrivate());
         PrepareMessage prepare = new PrepareMessage(msg.view(), msg.seqn(), expectedHash, sig);
@@ -235,7 +242,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     @UponMessageIn
     public void uponPrepareMsg(PrepareMessage msg, BabelNode sender) throws GeneralSecurityException {
-        if (!neighbors.contains(sender) || sender.equals(expectedPrimary()))
+        if (!neighbors.contains(sender) || sender.equals(expectedPrimary(currentView)))
             return;   // the primary's vote is its PrePrepare
 
         // verify the signature
@@ -277,16 +284,64 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         inViewChange = true;
         pendingView = newView;
 
-        // P = every instance this replica has prepared: (seqn, view, digest, batch)
-        List<PreparedProof> prepared = collectPrepared();
-        ViewChangeMsg vc = new ViewChangeMsg(newView, prepared);
-        viewChanges.computeIfAbsent(newView, k -> new HashMap<>()).put(runtime.getMyself(), vc);
-        sendToOthers(vc);
+        PBFTState state = stateFor(currentView, currentSeqn);
 
-        // if the NEW-VIEW doesn't arrive, escalate to newView + 1 with a longer timeout
-        if (viewChangeTimer != null) viewChangeTimer.cancel(false);
-        viewChangeTimer = runtime.setUpTimer(new ViewChangeTimer(newView), viewChangeTimeout(newView), TimeUnit.MILLISECONDS);
+        PreparedProof proof = state.getProof();
+
+        ViewChangeMsg vc = new ViewChangeMsg(newView, proof);
+        viewChanges.computeIfAbsent(newView, k -> new HashMap<>()).put(runtime.getMyself(), vc);
+        sendToNeighbors(vc, null);
 
         tryNewView(newView);
+    }
+
+    private boolean validateProof(PreparedProof proof) {
+        SignedProof preprepare = proof.preprepare();
+        if (!preprepare.sender().equals(expectedPrimary(preprepare.view())))
+            return false;
+
+        if (!Crypto.verify(
+                prePrepareBytes(preprepare.view(), preprepare.seqn(), preprepare.digest()),
+                preprepare.signature(),
+                        ((PublicKeyBabelNode) preprepare.sender()).identity()))
+            return false;
+
+        for (SignedProof p : proof.prepares()) {
+            if (!Crypto.verify(
+                    prepareBytes(p.view(), p.seqn(), p.digest()),
+                    p.signature(),
+                    ((PublicKeyBabelNode) p.sender()).identity()))
+                return false;
+        }
+
+        return true;
+    }
+
+    @UponMessageIn
+    public void uponViewChangeMsg(ViewChangeMsg msg, BabelNode sender) {
+        if (!neighbors.contains(sender) || msg.newView() <= currentView || !validateProof(msg.proof())) return;
+
+        var votes = viewChanges.computeIfAbsent(msg.newView(), k -> new HashMap<>());
+        votes.putIfAbsent(sender, msg);
+
+        // amplification: f+1 replicas want a higher view -> join, so we don't get left behind
+        if (!inViewChange && votes.size() >= amplificationQuorum)
+            startViewChange(msg.newView());
+
+        tryNewView(msg.newView());
+    }
+
+    private void tryNewView(long newView) {
+        var votes = viewChanges.get(newView);
+        if (votes == null || votes.size() < newViewQuorum) return;
+        if (!expectedPrimary(newView).equals(runtime.getMyself())) return;
+
+        // O: for each seqn between min and max in the prepared sets, take the proof with the highest view;
+        // seqns with no proof get an EMPTY batch (null request) so there are no holes.
+        List<PrePrepareMessage> o = computeO(newView, votes.values());
+
+        NewViewMsg nv = new NewViewMsg(newView, List.copyOf(votes.values()), o);
+        sendToOthers(nv);
+        installView(newView, o);          // the primary installs it too
     }
 }
