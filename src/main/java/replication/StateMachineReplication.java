@@ -144,6 +144,7 @@ public class StateMachineReplication implements BabelProtocol {
         stopSuspectTimer();
         suspectTimeout *= 2; // back off after each view change
         currentBatch.clear();
+        submitted.clear();
 
         if (myselfPrimary()) {
             unexecuted.values().forEach(this::submitTransaction);   // re-propose what is still pending
@@ -207,7 +208,7 @@ public class StateMachineReplication implements BabelProtocol {
         boolean progress = false;
         while ((next = pending.remove(nextSeqn)) != null) {
             for (Transfer t : next) {
-                runtime.deliverEvent(new ExecuteTransaction(t);
+                runtime.deliverEvent(new ExecuteTransaction(t));
                 markExecuted(t);
             }
 

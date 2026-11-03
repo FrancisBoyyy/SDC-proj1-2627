@@ -103,10 +103,16 @@ public class PBFTState {
         return count;
     }
 
+    public boolean isPrepared() {
+        return prepared;
+    }
+
+    /** Only valid once prepared: the PrePrepare, its batch and the Prepares matching its digest. */
     public PreparedProof getProof() {
         return new PreparedProof(
                 signedPrePrepare,
-                prepares.values().stream().toList()
+                batch,
+                prepares.values().stream().filter(p -> p.digest().equals(digest)).toList()
         );
     }
 

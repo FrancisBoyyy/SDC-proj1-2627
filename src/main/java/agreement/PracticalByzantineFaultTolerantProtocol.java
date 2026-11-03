@@ -3,11 +3,12 @@ package agreement;
 import agreement.events.Decided;
 import agreement.events.Propose;
 import agreement.events.SuspectPrimary;
+import agreement.events.ViewChanged;
 import agreement.messages.CommitMessage;
 import agreement.messages.PrePrepareMessage;
 import agreement.messages.PrepareMessage;
+import agreement.messages.NewViewMsg;
 import agreement.messages.ViewChangeMsg;
-import agreement.timers.ViewChangeTimer;
 import agreement.messages.SignedProof;
 import agreement.messages.PreparedProof;
 import org.apache.logging.log4j.LogManager;
@@ -28,7 +29,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.util.*;
 import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
 
 public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
@@ -152,6 +152,9 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         state.setCommited();
 
+        if (!decidedSeqns.add(seqn))
+            return; // already decided in an earlier view (re-agreed through O)
+
         Decided decided = new Decided(seqn, state.getBatch());
         LOGGER.info("Commits quorum reached -> Decide {} sent to SMR", decided);
         runtime.deliverEvent(decided);
@@ -242,7 +245,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     @UponMessageIn
     public void uponPrepareMsg(PrepareMessage msg, BabelNode sender) throws GeneralSecurityException {
-        if (!neighbors.contains(sender) || sender.equals(expectedPrimary(currentView)))
+        if (!neighbors.contains(sender) || sender.equals(expectedPrimary(msg.view())))
             return;   // the primary's vote is its PrePrepare
 
         // verify the signature
@@ -274,52 +277,103 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         tryCommitted(state, msg.seqn());
     }
 
+
+    // ---------------------------------------------------------------- view change
+
+    private static byte[] viewChangeBytes(long newView, List<PreparedProof> proofs) {
+        StringBuilder sb = new StringBuilder("ViewChange|").append(newView);
+        for (PreparedProof p : proofs) {
+            SignedProof pp = p.preprepare();
+            sb.append('|').append(pp.view()).append(':').append(pp.seqn()).append(':').append(pp.digest());
+        }
+        return sb.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
     @UponBabelEvent
-    public void uponSuspectPrimary(SuspectPrimary suspect) {
+    public void uponSuspectPrimary(SuspectPrimary suspect) throws GeneralSecurityException {
         if (suspect.view() == currentView && !inViewChange)
             startViewChange(currentView + 1);
     }
 
-    private void startViewChange(long newView) {
+    private void startViewChange(long newView) throws GeneralSecurityException {
         inViewChange = true;
         pendingView = newView;
 
-        PBFTState state = stateFor(currentView, currentSeqn);
+        // P: for each seqn, the prepared proof of the highest view (nothing is garbage collected: no checkpoints)
+        Map<Long, PreparedProof> best = new TreeMap<>();
+        for (PBFTState state : instances.values()) {
+            if (!state.isPrepared())
+                continue;
+            PreparedProof proof = state.getProof();
+            best.merge(proof.preprepare().seqn(), proof,
+                    (a, b) -> a.preprepare().view() >= b.preprepare().view() ? a : b);
+        }
+        List<PreparedProof> proofs = List.copyOf(best.values());
 
-        PreparedProof proof = state.getProof();
+        byte[] sig = Crypto.sign(viewChangeBytes(newView, proofs), runtime.getKeys().getPrivate());
+        ViewChangeMsg vc = new ViewChangeMsg(newView, proofs, runtime.getMyself(), sig);
+        LOGGER.info("Starting view change to view {} with {} prepared proofs", newView, proofs.size());
 
-        ViewChangeMsg vc = new ViewChangeMsg(newView, proof);
         viewChanges.computeIfAbsent(newView, k -> new HashMap<>()).put(runtime.getMyself(), vc);
-        sendToNeighbors(vc, null);
+        sendToOthers(vc);
 
         tryNewView(newView);
     }
 
     private boolean validateProof(PreparedProof proof) {
-        SignedProof preprepare = proof.preprepare();
-        if (!preprepare.sender().equals(expectedPrimary(preprepare.view())))
+        SignedProof pp = proof.preprepare();
+        if (!neighbors.contains(pp.sender()) || !pp.sender().equals(expectedPrimary(pp.view())))
             return false;
 
-        if (!Crypto.verify(
-                prePrepareBytes(preprepare.view(), preprepare.seqn(), preprepare.digest()),
-                preprepare.signature(),
-                        ((PublicKeyBabelNode) preprepare.sender()).identity()))
+        if (!pp.digest().equals(PBFTState.operationDigest(proof.ms())))
             return false;
 
+        if (!Crypto.verify(prePrepareBytes(pp.view(), pp.seqn(), pp.digest()),
+                pp.signature(),
+                ((PublicKeyBabelNode) pp.sender()).identity()))
+            return false;
+
+        Set<BabelNode> signers = new HashSet<>();
         for (SignedProof p : proof.prepares()) {
-            if (!Crypto.verify(
-                    prepareBytes(p.view(), p.seqn(), p.digest()),
+            if (p.view() != pp.view() || p.seqn() != pp.seqn() || !p.digest().equals(pp.digest()))
+                return false;
+            // only backups, each counted once (the primary's vote is its PrePrepare)
+            if (!neighbors.contains(p.sender()) || p.sender().equals(pp.sender()) || !signers.add(p.sender()))
+                return false;
+            if (!Crypto.verify(prepareBytes(p.view(), p.seqn(), p.digest()),
                     p.signature(),
                     ((PublicKeyBabelNode) p.sender()).identity()))
                 return false;
         }
 
+        return signers.size() >= prepareQuorum - 1; // 2f prepares + the PrePrepare
+    }
+
+    private boolean validateViewChange(ViewChangeMsg vc) {
+        if (!neighbors.contains(vc.sender()))
+            return false;
+
+        if (!Crypto.verify(viewChangeBytes(vc.newView(), vc.proofs()),
+                vc.sig(),
+                ((PublicKeyBabelNode) vc.sender()).identity()))
+            return false;
+
+        Set<Long> seqns = new HashSet<>();
+        for (PreparedProof proof : vc.proofs()) {
+            // one proof per seqn, and it must come from a view older than the one being installed
+            if (!seqns.add(proof.preprepare().seqn()) || proof.preprepare().view() >= vc.newView())
+                return false;
+            if (!validateProof(proof))
+                return false;
+        }
         return true;
     }
 
     @UponMessageIn
-    public void uponViewChangeMsg(ViewChangeMsg msg, BabelNode sender) {
-        if (!neighbors.contains(sender) || msg.newView() <= currentView || !validateProof(msg.proof())) return;
+    public void uponViewChangeMsg(ViewChangeMsg msg, BabelNode sender) throws GeneralSecurityException {
+        if (!neighbors.contains(sender) || !sender.equals(msg.sender())
+                || msg.newView() <= currentView || !validateViewChange(msg))
+            return;
 
         var votes = viewChanges.computeIfAbsent(msg.newView(), k -> new HashMap<>());
         votes.putIfAbsent(sender, msg);
@@ -331,17 +385,129 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         tryNewView(msg.newView());
     }
 
-    private void tryNewView(long newView) {
+    /**
+     * For every seqn in (minS, maxS], the batch of the prepared proof with the highest view among the
+     * view-changes, or an empty batch (null request) if no replica proved anything for it, so there are no holes.
+     * minS is 0 because there are no checkpoints. Deterministic, so backups can recompute and check it.
+     */
+    private SortedMap<Long, List<BabelMessage>> chooseBatches(Collection<ViewChangeMsg> msgs) {
+        Map<Long, PreparedProof> best = new HashMap<>();
+        long minS = 0L;
+        long maxS = minS;
+        for (ViewChangeMsg msg : msgs) {
+            for (PreparedProof proof : msg.proofs()) {
+                long seqn = proof.preprepare().seqn();
+                maxS = Math.max(maxS, seqn);
+                best.merge(seqn, proof, (a, b) -> a.preprepare().view() >= b.preprepare().view() ? a : b);
+            }
+        }
+
+        SortedMap<Long, List<BabelMessage>> chosen = new TreeMap<>();
+        for (long s = minS + 1; s <= maxS; s++) {
+            PreparedProof proof = best.get(s);
+            chosen.put(s, proof != null ? proof.ms() : List.of());
+        }
+        return chosen;
+    }
+
+    /** The set O of PrePrepares for {@code view}, signed by this replica (the new primary). */
+    private List<PrePrepareMessage> computeO(long view, Collection<ViewChangeMsg> msgs) throws GeneralSecurityException {
+        List<PrePrepareMessage> o = new ArrayList<>();
+        for (var entry : chooseBatches(msgs).entrySet()) {
+            long seqn = entry.getKey();
+            List<BabelMessage> batch = entry.getValue();
+            String digest = PBFTState.operationDigest(batch);
+            byte[] sig = Crypto.sign(prePrepareBytes(view, seqn, digest), runtime.getKeys().getPrivate());
+            o.add(new PrePrepareMessage(batch, view, seqn, digest, sig));
+        }
+        return o;
+    }
+
+    private void tryNewView(long newView) throws GeneralSecurityException {
+        if (newView <= currentView || !inViewChange || pendingView != newView)
+            return;
+
         var votes = viewChanges.get(newView);
         if (votes == null || votes.size() < newViewQuorum) return;
         if (!expectedPrimary(newView).equals(runtime.getMyself())) return;
 
-        // O: for each seqn between min and max in the prepared sets, take the proof with the highest view;
-        // seqns with no proof get an EMPTY batch (null request) so there are no holes.
-        List<PrePrepareMessage> o = computeO(newView, votes.values());
+        List<ViewChangeMsg> proofs = List.copyOf(votes.values());
+        List<PrePrepareMessage> o = computeO(newView, proofs);
 
-        NewViewMsg nv = new NewViewMsg(newView, List.copyOf(votes.values()), o);
+        NewViewMsg nv = new NewViewMsg(newView, proofs, o);
+        LOGGER.info("Sending NewView for view {} with {} PrePrepares in O", newView, o.size());
         sendToOthers(nv);
-        installView(newView, o);          // the primary installs it too
+        installView(newView, o);
+    }
+
+    @UponMessageIn
+    public void uponNewViewMsg(NewViewMsg msg, BabelNode sender) throws GeneralSecurityException {
+        long view = msg.view();
+        if (view <= currentView || !sender.equals(expectedPrimary(view)))
+            return;
+
+        // 2f+1 valid ViewChange messages for this view from distinct replicas
+        Set<BabelNode> signers = new HashSet<>();
+        for (ViewChangeMsg vc : msg.viewChanges()) {
+            if (vc.newView() != view || !validateViewChange(vc) || !signers.add(vc.sender())) {
+                LOGGER.warn("Invalid NewView for view {} from {}", view, sender);
+                return;
+            }
+        }
+        if (signers.size() < newViewQuorum)
+            return;
+
+        // O must be exactly what we compute from those view-changes
+        var expected = chooseBatches(msg.viewChanges());
+        if (msg.o().size() != expected.size())
+            return;
+
+        int i = 0;
+        for (var entry : expected.entrySet()) {
+            PrePrepareMessage pp = msg.o().get(i++);
+            String digest = PBFTState.operationDigest(entry.getValue());
+            if (pp.view() != view || pp.seqn() != entry.getKey()
+                    || !pp.hash().equals(digest) || !digest.equals(PBFTState.operationDigest(pp.ms()))
+                    || !Crypto.verify(prePrepareBytes(view, pp.seqn(), digest), pp.sig(),
+                            ((PublicKeyBabelNode) sender).identity())) {
+                LOGGER.warn("NewView for view {} has a wrong O at seqn {}", view, entry.getKey());
+                return;
+            }
+        }
+
+        installView(view, msg.o());
+    }
+
+    /**
+     * Moves to {@code view} and processes O as if each PrePrepare had been received normally: backups send their
+     * Prepare, so the normal prepare/commit phases run again for them (Decided is deduplicated by decidedSeqns).
+     */
+    private void installView(long view, List<PrePrepareMessage> o) throws GeneralSecurityException {
+        BabelNode primary = expectedPrimary(view);
+        boolean iAmPrimary = primary.equals(runtime.getMyself());
+
+        currentView = view;
+        inViewChange = false;
+        viewChanges.keySet().removeIf(v -> v <= view);
+
+        long maxS = 0L;
+        for (PrePrepareMessage pp : o) {
+            maxS = Math.max(maxS, pp.seqn());
+            PBFTState state = stateFor(view, pp.seqn());
+            state.setPrePrepared(pp, primary);
+
+            if (iAmPrimary)
+                continue;
+
+            byte[] sig = Crypto.sign(prepareBytes(view, pp.seqn(), pp.hash()), runtime.getKeys().getPrivate());
+            PrepareMessage prepare = new PrepareMessage(view, pp.seqn(), pp.hash(), sig);
+            state.registerPrepare(runtime.getMyself(), prepare);
+            sendToNeighbors(prepare, null);
+            tryPrepared(state, view, pp.seqn());   // prepares of this view may have been buffered
+        }
+        currentSeqn = Math.max(currentSeqn, maxS); // the new primary continues after O
+
+        LOGGER.info("Installed view {} (primary {})", view, primary);
+        runtime.deliverEvent(new ViewChanged(view, primary));
     }
 }
