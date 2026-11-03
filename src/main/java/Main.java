@@ -2,6 +2,8 @@ import java.security.cert.CertificateException;
 
 import app.PaymentService;
 import app.ledger.Ledger;
+import app.ledger.TransferOutcomeJournal;
+import blockchain.BlockchainByzantineProfile;
 import blockchain.BlockchainConfig;
 import blockchain.BlockchainReplicationProtocol;
 import broadcast.ByzantineReliableBroadcastProtocol;
@@ -87,14 +89,20 @@ void main(String[] args) throws IOException, KeyStoreException,
 
     // The application (the same for all the variants of the project)
     var ledger = new Ledger(config.getAccountOwners(), config.getClientKeys(), config.getInitialBalance());
+    boolean auditEnabled = Boolean.parseBoolean(
+            properties.getProperty("audit_enabled", "false"));
+    var auditJournal = auditEnabled ? new TransferOutcomeJournal() : null;
     var paymentService = new PaymentService(ledger,
-            Long.parseLong(properties.getProperty("digest_interval", "5000")));
+            Long.parseLong(properties.getProperty("digest_interval", "5000")),
+            auditJournal);
 
     // The replication and dissemination/agreement protocols: replace these by
     // your own protocols.
     var blockchainConfig = BlockchainConfig.from(properties);
+    var blockchainByzantineProfile = BlockchainByzantineProfile.fromProperty(
+            properties.getProperty("blockchain_byzantine_profile", "none"));
     var replicationProtocol = new BlockchainReplicationProtocol(
-            blockchainConfig, ledger::isValid);
+            blockchainConfig, ledger::isValid, blockchainByzantineProfile);
     var broadcastProtocol = new ByzantineReliableBroadcastProtocol(membership, config.getF());
     var membershipProtocol = new StaticMembershipProtocol(membership,
             Long.parseLong(properties.getProperty("reconnect_interval", "1000")));

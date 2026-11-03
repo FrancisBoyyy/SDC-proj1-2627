@@ -17,10 +17,10 @@ final class BlockchainState {
     private final Map<String, BlockNode> blocksByHash = new HashMap<>();
     private final Map<String, List<Block>> orphansByParent = new HashMap<>();
     private final LinkedHashMap<String, Block> orphansByHash = new LinkedHashMap<>();
+    private final Set<String> handedOffStableBlockHashes = new HashSet<>();
 
     private final BlockNode genesis;
     private BlockNode tip;
-    private BlockNode finalizedTip;
 
     BlockchainState(BlockchainConfig config, Predicate<Transfer> validTransfer) {
         this.config = Objects.requireNonNull(config, "config");
@@ -28,15 +28,12 @@ final class BlockchainState {
 
         genesis = new BlockNode(Block.genesis(), null);
         tip = genesis;
-        finalizedTip = genesis;
         blocksByHash.put(genesis.hash(), genesis);
     }
 
     BlockNode genesis() { return genesis; }
 
     BlockNode tip() { return tip; }
-
-    BlockNode finalizedTip() { return finalizedTip; }
 
     /**
      * Inserts a valid block. A block whose parent is not known is retained as
@@ -75,30 +72,34 @@ final class BlockchainState {
     }
 
     /**
-     * Returns newly finalized blocks in chain order. With k confirmations,
-     * the selected tip must be k blocks above a block before it is returned.
+     * Returns blocks on the current longest valid chain that have reached k
+     * confirmations and have not previously been handed to the application.
+     *
+     * <p>Blocks on a competing fork remain eligible even when they conflict
+     * with a block handed off earlier. The payment service does not support
+     * rollback, so a deep reorganization can leave irreversible application
+     * effects from both branches.
      */
-    List<Block> advanceFinality() {
+    List<Block> advanceStableBlocks() {
         long targetHeight = tip.height() - config.confirmations();
-        if (targetHeight <= finalizedTip.height())
+        if (targetHeight <= 0)
             return List.of();
 
-        BlockNode newFinalizedTip = tip;
-        while (newFinalizedTip.height() > targetHeight)
-            newFinalizedTip = Objects.requireNonNull(newFinalizedTip.parent());
+        BlockNode stableTip = tip;
+        while (stableTip.height() > targetHeight)
+            stableTip = Objects.requireNonNull(stableTip.parent());
 
-        if (!extendsFinalizedCheckpoint(newFinalizedTip))
-            throw new IllegalStateException("Selected chain conflicts with finalized checkpoint");
-
-        List<Block> newlyFinalized = new ArrayList<>();
-        BlockNode current = newFinalizedTip;
-        while (current.height() > finalizedTip.height()) {
-            newlyFinalized.add(current.block());
+        List<Block> newlyStable = new ArrayList<>();
+        BlockNode current = stableTip;
+        while (current.height() > 0) {
+            if (!handedOffStableBlockHashes.contains(current.hash()))
+                newlyStable.add(current.block());
             current = Objects.requireNonNull(current.parent());
         }
-        Collections.reverse(newlyFinalized);
-        finalizedTip = newFinalizedTip;
-        return List.copyOf(newlyFinalized);
+        Collections.reverse(newlyStable);
+        for (Block block : newlyStable)
+            handedOffStableBlockHashes.add(block.hash());
+        return List.copyOf(newlyStable);
     }
 
     private boolean hasValidBasicFields(Block block) {
@@ -116,8 +117,7 @@ final class BlockchainState {
     private boolean hasValidContext(Block block, BlockNode parent) {
         if (parent.height() == Long.MAX_VALUE
                 || block.height() != parent.height() + 1
-                || !block.parentHash().equals(parent.hash())
-                || !extendsFinalizedCheckpoint(parent))
+                || !block.parentHash().equals(parent.hash()))
             return false;
 
         Set<String> idsInBlock = new HashSet<>();
@@ -129,13 +129,6 @@ final class BlockchainState {
                 return false;
         }
         return true;
-    }
-
-    private boolean extendsFinalizedCheckpoint(BlockNode node) {
-        BlockNode current = node;
-        while (current.height() > finalizedTip.height())
-            current = Objects.requireNonNull(current.parent());
-        return current.hash().equals(finalizedTip.hash());
     }
 
     private void updateTip(BlockNode candidate) {

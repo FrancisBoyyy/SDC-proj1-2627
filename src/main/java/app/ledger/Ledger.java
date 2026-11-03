@@ -293,6 +293,37 @@ public final class Ledger {
         }
     }
 
+    /**
+     * Creates an immutable snapshot of the current ledger state.
+     */
+    public LedgerSnapshot snapshot() {
+        Map<String, LedgerSnapshot.AccountState> accountSnapshots = new TreeMap<>();
+
+        for (String name : new TreeSet<>(accounts.keySet())) {
+            Account account = requireAccount(name);
+
+            List<String> executedIds = List.copyOf(account.executedIds);
+
+            List<String> pendingIds = account.pending.values().stream()
+                    .map(Transfer::id)
+                    .toList();
+
+            accountSnapshots.put(name, new LedgerSnapshot.AccountState(
+                    account.balance,
+                    account.nextSeq,
+                    executedIds,
+                    pendingIds
+            ));
+        }
+
+        return new LedgerSnapshot(
+                accountSnapshots,
+                totalSupply,
+                sumOfBalances(),
+                stateDigest()
+        );
+    }
+
     private static byte[] concat(byte[] a, byte[] b) {
         byte[] r = java.util.Arrays.copyOf(a, a.length + b.length);
         System.arraycopy(b, 0, r, a.length, b.length);

@@ -3,9 +3,11 @@ package broadcast;
 import broadcast.messages.SendBroadcastMessage;
 import broadcast.messages.EchoBroadcastMessage;
 import broadcast.messages.ReadyBroadcastMessage;
+import broadcast.events.SelectiveBroadcastRequest;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import pt.unl.fct.di.novasys.babel2.annotations.UponMessageIn;
+import pt.unl.fct.di.novasys.babel2.annotations.UponBabelEvent;
 import pt.unl.fct.di.novasys.babel2.channels.BabelChannel;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 import pt.unl.fct.di.novasys.babel2.channels.ComposedBabelChannel;
@@ -83,6 +85,36 @@ public class ByzantineReliableBroadcastProtocol
 
         sendToNeighbors(message);
         sendEcho(state, message);
+    }
+
+    @UponBabelEvent
+    public void uponSelectiveBroadcastRequest(SelectiveBroadcastRequest request) {
+        BabelNode myself = runtime.getMyself();
+        List<BabelNode> targets = members.stream()
+                .filter(member -> !member.equals(myself))
+                .sorted(Comparator.comparing(BabelNode::toString))
+                .limit(request.recipientCount())
+                .toList();
+        if (targets.size() != request.recipientCount()) {
+            throw new IllegalArgumentException(
+                    "Not enough other members for selective broadcast");
+        }
+
+        var message = new SendBroadcastMessage(
+                UUID.randomUUID(), myself, request.payload());
+        var state = stateFor(message);
+        state.send = message;
+        state.sendTargets.addAll(targets);
+
+        LOGGER.warn("BYZANTINE_ACTION profile=selective_send origin={} id={} "
+                        + "recipient_count={} recipients={}",
+                myself, message.id(), targets.size(), targets);
+        for (BabelNode target : targets) {
+            if (neighbors.contains(target))
+                channel.send(target, message);
+        }
+        // Deliberately do not ECHO locally: the faulty origin only sends SEND
+        // to its selected recipient(s).
     }
 
     @UponMessageIn
@@ -193,7 +225,11 @@ public class ByzantineReliableBroadcastProtocol
             var echo = state.echo;
             var ready = state.ready;
 
-            if (send != null) channel.send(node, send);
+            if (send != null
+                    && (state.sendTargets.isEmpty()
+                    || state.sendTargets.contains(node))) {
+                channel.send(node, send);
+            }
             if (echo != null) channel.send(node, new EchoBroadcastMessage(echo));
             if (ready != null) channel.send(node, new ReadyBroadcastMessage(ready));
 

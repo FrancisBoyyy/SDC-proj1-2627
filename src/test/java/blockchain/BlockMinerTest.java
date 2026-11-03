@@ -2,6 +2,7 @@ package blockchain;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -60,6 +61,27 @@ class BlockMinerTest {
             assertTrue(result != null, "Current mining generation did not report");
             assertEquals(newGeneration, result.generation());
             assertFalse(results.stream().anyMatch(event -> event.generation() == oldGeneration));
+        } finally {
+            runtime.shutdown();
+        }
+    }
+
+    @Test
+    void minersUseDifferentNonceStartsForIdenticalCandidates() throws Exception {
+        BlockingQueue<BlockMined> results = new LinkedBlockingQueue<>();
+        Babel runtime = runtime(results);
+
+        try (var firstMiner = new BlockMiner(runtime, () -> 41L);
+                var secondMiner = new BlockMiner(runtime, () -> 42L)) {
+            firstMiner.mine(Block.genesis().hash(), 1, List.of(), 0);
+            secondMiner.mine(Block.genesis().hash(), 1, List.of(), 0);
+
+            BlockMined first = results.poll(2, TimeUnit.SECONDS);
+            BlockMined second = results.poll(2, TimeUnit.SECONDS);
+
+            assertTrue(first != null, "First miner did not report a block");
+            assertTrue(second != null, "Second miner did not report a block");
+            assertNotEquals(first.block().hash(), second.block().hash());
         } finally {
             runtime.shutdown();
         }

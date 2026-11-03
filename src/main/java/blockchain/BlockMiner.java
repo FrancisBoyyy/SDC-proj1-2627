@@ -4,7 +4,9 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 import app.messages.Transfer;
 import blockchain.events.BlockMined;
@@ -16,6 +18,7 @@ import pt.unl.fct.di.novasys.babel2.core.Babel;
 final class BlockMiner implements AutoCloseable {
 
     private final Babel runtime;
+    private final LongSupplier nonceStartSupplier;
     private final ExecutorService worker =
             Executors.newSingleThreadExecutor(task -> {
                 Thread thread = new Thread(task, "block-miner");
@@ -25,7 +28,13 @@ final class BlockMiner implements AutoCloseable {
     private final AtomicLong currentGeneration = new AtomicLong();
 
     BlockMiner(Babel runtime) {
+        this(runtime, () -> ThreadLocalRandom.current().nextLong());
+    }
+
+    BlockMiner(Babel runtime, LongSupplier nonceStartSupplier) {
         this.runtime = Objects.requireNonNull(runtime, "runtime");
+        this.nonceStartSupplier = Objects.requireNonNull(
+                nonceStartSupplier, "nonceStartSupplier");
     }
 
     /**
@@ -45,8 +54,11 @@ final class BlockMiner implements AutoCloseable {
         // changes cannot alter the work being performed.
         Block candidate = new Block(parentHash, height, transactions, 0);
         long generation = currentGeneration.incrementAndGet();
+        // Avoid having miners with identical candidates repeatedly solve the
+        // same proof of work from nonce zero.
+        long nonceStart = nonceStartSupplier.getAsLong();
 
-        worker.submit(() -> search(candidate, difficultyBits, generation));
+        worker.submit(() -> search(candidate, difficultyBits, generation, nonceStart));
         return generation;
     }
 
@@ -55,9 +67,13 @@ final class BlockMiner implements AutoCloseable {
      */
     long cancel() { return currentGeneration.incrementAndGet(); }
 
-    private void search(Block candidate, int difficultyBits, long generation) {
-        long nonce = 0;
-
+    private void search(
+            Block candidate,
+            int difficultyBits,
+            long generation,
+            long nonceStart
+    ) {
+        long nonce = nonceStart;
         while (isCurrent(generation) && !Thread.currentThread().isInterrupted()) {
             Block attempt = candidate.withNonce(nonce);
 
