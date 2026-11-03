@@ -2,6 +2,7 @@ package agreement.messages;
 
 import pt.unl.fct.di.novasys.babel2.channels.BabelIPMessage;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
+import pt.unl.fct.di.novasys.babel2.core.BabelNode;
 
 // Messages only need to implement the BabelMessage interface. Additionally, we can also annotate with the BabelIPMessage
 // annotation to generate the serializer for us. If you use the annotation, the message MUST be a record.
@@ -13,5 +14,5 @@ import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 // SortedSet) (deserialized messages from the network will be constructed with immutable versions of the collections),
 // or BabelMessage with a registered serializer (such as the payload below).
 @BabelIPMessage(id = 301)
-public record PrepareMessage(long view, long seqn, String hash) implements BabelMessage {
+public record PrepareMessage(long view, long seqn, String hash, byte[] sig) implements BabelMessage {
 }

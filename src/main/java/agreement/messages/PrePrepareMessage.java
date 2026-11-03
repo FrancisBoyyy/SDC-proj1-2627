@@ -15,5 +15,5 @@ import java.util.List;
 // SortedSet) (deserialized messages from the network will be constructed with immutable versions of the collections),
 // or BabelMessage with a registered serializer (such as the payload below).
 @BabelIPMessage(id = 300)
-public record PrePrepareMessage(List<BabelMessage> ms, long view, long seqn, String hash) implements BabelMessage {
+public record PrePrepareMessage(List<BabelMessage> ms, long view, long seqn, String hash, byte[] sig) implements BabelMessage {
 }

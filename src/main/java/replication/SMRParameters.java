@@ -5,7 +5,7 @@ import java.util.Properties;
 /**
  * Parameters of the SMR.
  */
-public record SMRParameters(int batchSize, long batchTimeout) {
+public record SMRParameters(int batchSize, long batchTimeout, long suspectTimeout) {
 
     public SMRParameters {
         if (batchSize <= 0)
@@ -15,7 +15,8 @@ public record SMRParameters(int batchSize, long batchTimeout) {
     public static SMRParameters fromProperties(Properties props) {
         return new SMRParameters(
                 Integer.parseInt(props.getProperty("batch_size", "10")),
-                Integer.parseInt(props.getProperty("batch_timeout", "2000"))
+                Integer.parseInt(props.getProperty("batch_timeout", "2000")),
+                Integer.parseInt(props.getProperty("suspect_timeout", "2000"))
         );
     }
 }

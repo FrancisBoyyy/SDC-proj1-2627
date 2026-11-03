@@ -2,6 +2,8 @@ package replication;
 
 import agreement.events.Decided;
 import agreement.events.Propose;
+import agreement.events.SuspectPrimary;
+import agreement.events.ViewChanged;
 import agreement.messages.ProposeMsg;
 import app.messages.Transfer;
 import org.apache.logging.log4j.LogManager;
@@ -18,6 +20,8 @@ import pt.unl.fct.di.novasys.babel2.core.BabelNode;
 import pt.unl.fct.di.novasys.babel2.core.BabelProtocol;
 import replication.events.ExecuteTransaction;
 import replication.events.SubmitTransaction;
+import replication.timers.BatchTimer;
+import replication.timers.SuspectTimer;
 
 import java.util.*;
 import java.util.concurrent.ScheduledFuture;
@@ -44,8 +48,16 @@ public class StateMachineReplication implements BabelProtocol {
     private static final Logger LOGGER = LogManager.getLogger(StateMachineReplication.class);
 
     private final SMRParameters params;
+    private final List<BabelNode> membership;
+
     private List<BabelMessage> currentBatch;
     private @Nullable ScheduledFuture<?> batchTimer;
+
+    private final Map<String, Transfer> unexecuted;
+    private final Set<String> executed;
+    private @Nullable ScheduledFuture<?> suspectTimer;
+    private long suspectTimeout;
+    private long view;
 
     private final Set<String> submitted; // already submitted operations to Agreement protocol
     private long nextSeqn;
@@ -56,18 +68,26 @@ public class StateMachineReplication implements BabelProtocol {
     private BabelChannel channel;
 
     private final Predicate<Transfer> validTransfer;
+
     public StateMachineReplication(List<BabelNode> membership, Predicate<Transfer> validTransfer, SMRParameters params) {
         if (membership.isEmpty())
             throw new IllegalArgumentException("Require a non-empty membership");
 
         this.params = params;
-        this.currentBatch = new LinkedList<>();
 
+        this.suspectTimeout = params.suspectTimeout();
+
+        this.currentBatch = new LinkedList<>();
+        this.view = 0L; // by convention!
+
+        this.unexecuted  = new HashMap<>();
+        this.executed = new HashSet<>();
         this.submitted = new HashSet<>();
         this.nextSeqn = 1L; // the first seqn conventioned to be executed
         this.pending = new TreeMap<>();
 
         this.primary = membership.getFirst(); // by convention!
+        this.membership = membership;
 
         this.validTransfer = validTransfer;
     }
@@ -78,9 +98,28 @@ public class StateMachineReplication implements BabelProtocol {
         this.channel = channel;
 
         this.batchTimer = null;
+        this.suspectTimer = null;
     }
 
     private record DecidedTransferBatch(List<Transfer> ms, long seqn) {}
+
+    private boolean myselfPrimary() {
+        return runtime.getMyself().equals(primary);
+    }
+
+    private void startSuspectTimer() {
+        if (suspectTimer != null || myselfPrimary())
+            return;
+
+        suspectTimer = runtime.setUpTimer(new SuspectTimer(view), suspectTimeout, TimeUnit.MILLISECONDS);
+    }
+
+    private void stopSuspectTimer() {
+        if (suspectTimer != null) {
+            suspectTimer.cancel(false);
+            suspectTimer = null;
+        }
+    }
 
     @UponBabelEvent
     public void uponBatchTimer(BatchTimer timer) {
@@ -89,17 +128,44 @@ public class StateMachineReplication implements BabelProtocol {
     }
 
     @UponBabelEvent
+    public void uponSuspectTimer(SuspectTimer timer) {
+        suspectTimer = null;
+        if (timer.view() != view)
+            return; // stale timer
+
+        LOGGER.warn("Request timeout in view {}, suspecting primary", view);
+        runtime.deliverEvent(new SuspectPrimary(view));  // PBFT handles it
+    }
+
+    @UponBabelEvent
+    public void uponViewChanged(ViewChanged viewChanged) {
+        view = viewChanged.view();
+        primary = membership.get(Math.floorMod(view, membership.size()));
+        stopSuspectTimer();
+        suspectTimeout *= 2; // back off after each view change
+        currentBatch.clear();
+
+        if (myselfPrimary()) {
+            unexecuted.values().forEach(this::submitTransaction);   // re-propose what is still pending
+        } else {
+            unexecuted.values().forEach(t -> channel.send(primary, new ProposeMsg(t)));
+            startSuspectTimer();
+        }
+    }
+
+    @UponBabelEvent
     public void uponSubmitTransaction(SubmitTransaction submit) {
         Transfer transfer = submit.transfer();
+        if (executed.contains(transfer.id())) return;
 
-        if (!runtime.getMyself().equals(primary)) {
-            LOGGER.info("Sending the transfer {} to primary {} because i am not the primary", transfer.id(), primary);
+        if (unexecuted.putIfAbsent(transfer.id(), transfer) == null)
+            startSuspectTimer();
+
+        if (myselfPrimary())
+            submitTransaction(transfer);
+
+        else
             channel.send(primary, new ProposeMsg(transfer));
-            return;
-        }
-
-        // this replica is the primary
-        submitTransaction(transfer);
     }
 
     private void submitTransaction(Transfer transfer) {
@@ -131,12 +197,31 @@ public class StateMachineReplication implements BabelProtocol {
         currentBatch.clear();
     }
 
+    private void markExecuted(Transfer transfer) {
+        unexecuted.remove(transfer.id());
+        executed.add(transfer.id());
+    }
+
     private void deliverPending() {
         List<Transfer> next;
+        boolean progress = false;
         while ((next = pending.remove(nextSeqn)) != null) {
-            next.forEach(t -> runtime.deliverEvent(new ExecuteTransaction(t)));
+            for (Transfer t : next) {
+                runtime.deliverEvent(new ExecuteTransaction(t);
+                markExecuted(t);
+            }
+
             nextSeqn++;
+            progress = true;
         }
+
+        if (!progress)
+            return;
+
+        // progress made so reset the suspect timer for what's is still unexecuted
+        stopSuspectTimer();
+        if (!unexecuted.isEmpty())
+            startSuspectTimer();
     }
 
     @UponBabelEvent
@@ -148,7 +233,7 @@ public class StateMachineReplication implements BabelProtocol {
         for (BabelMessage m : decided.batch()) {
             Transfer t = (Transfer) m;
             if (validTransfer.test(t))
-                batch.add(t);
+                batch.add(t); // if validTransfer remains deterministic, all replicas will converge to the same state
 
             else
                 LOGGER.warn("Ignoring invalid transfer {} in batch {}", t.id(), decided.sqn());
