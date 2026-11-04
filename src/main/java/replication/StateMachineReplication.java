@@ -41,11 +41,8 @@ public class StateMachineReplication implements BabelProtocol {
     private @Nullable ScheduledFuture<?> batchTimer;
 
     private final Map<String, Transfer> unexecuted; // transfers that were not executed yet (all replicas)
-    private final Set<String> executed; // executed transfers (all replicas)
     private @Nullable ScheduledFuture<?> suspectTimer;
     private long currentView;
-
-    private final Set<String> bacthed; // already bacthed transfers to Agreement protocol (primary)
     private long nextSeqn;
     private final TreeMap<Long, List<Transfer>> pending;
     private BabelNode primary;
@@ -53,9 +50,7 @@ public class StateMachineReplication implements BabelProtocol {
     private Babel runtime;
     private BabelChannel channel;
 
-    private final Predicate<Transfer> validTransfer;
-
-    public StateMachineReplication(List<BabelNode> membership, Predicate<Transfer> validTransfer, SMRParameters params) {
+    public StateMachineReplication(List<BabelNode> membership, SMRParameters params) {
         if (membership.isEmpty())
             throw new IllegalArgumentException("Require a non-empty membership");
 
@@ -65,15 +60,11 @@ public class StateMachineReplication implements BabelProtocol {
         this.currentView = 0L; // by convention!
 
         this.unexecuted  = new HashMap<>();
-        this.executed = new HashSet<>();
-        this.bacthed = new HashSet<>();
         this.nextSeqn = 1L; // the first seqn conventioned to be executed
         this.pending = new TreeMap<>();
 
         this.primary = membership.getFirst(); // by convention!
         this.membership = membership;
-
-        this.validTransfer = validTransfer;
     }
 
     @Override
@@ -100,13 +91,6 @@ public class StateMachineReplication implements BabelProtocol {
      */
     private boolean myselfPrimary() {
         return runtime.getMyself().equals(primary);
-    }
-
-    /**
-     * Evaluates if the given transfer can be executed!
-     */
-    private boolean canExecute(Transfer transfer) {
-        return !executed.contains(transfer.id());
     }
 
     // TIMERS
@@ -160,16 +144,12 @@ public class StateMachineReplication implements BabelProtocol {
     /**
      * App level transfer submissions. They need to be ordered before indicating them
      * back to the application.
-     * If that transfer id were already executed, returns immediately (preventing double spending).
      * Submit the transaction if the replica is the primary, otherwise
      * redirects it to the current primary while logging the transfer as unexecuted.
      */
     @UponBabelEvent
     public void uponSubmitTransaction(SubmitTransaction submit) {
         Transfer transfer = submit.transfer();
-
-        if (!canExecute(transfer))
-            return;
 
         if (unexecuted.putIfAbsent(transfer.id(), transfer) == null)
             startSuspectTimer();
@@ -185,16 +165,13 @@ public class StateMachineReplication implements BabelProtocol {
      * Submits the given transfer to the underlying agreement protocol within a batch of transfers.
      * When the batch reaches a specific threshold, flushes that list of transfers as one single operation.
      * Otherwise, adds the transfer to the current batch being formed, reducing the overhead of consensus.
-     * Already batched operations are not batched again, enforcing the "no double spending" criteria.
      * The batch timer is set up when building a new batch.
      * @param transfer the given transfer to order.
      */
     private void submitTransaction(Transfer transfer) {
-        if (bacthed.add(transfer.id())) {
-            currentBatch.add(transfer);
-            if (currentBatch.size() == 1)
-                batchTimer = runtime.setUpTimer(new BatchTimer(), params.batchTimeout(), TimeUnit.MILLISECONDS);
-        }
+        currentBatch.add(transfer);
+        if (currentBatch.size() == 1)
+            batchTimer = runtime.setUpTimer(new BatchTimer(), params.batchTimeout(), TimeUnit.MILLISECONDS);
 
         if (currentBatch.size() >= params.batchSize())
             submitCurrentBatch();
@@ -243,11 +220,7 @@ public class StateMachineReplication implements BabelProtocol {
         boolean progress = false;
         while ((next = pending.remove(nextSeqn)) != null) {
             for (Transfer t : next) {
-                if (canExecute(t) && validTransfer.test(t)) {
-                    runtime.deliverEvent(new ExecuteTransaction(t));
-                    executed.add(t.id());
-                }
-
+                runtime.deliverEvent(new ExecuteTransaction(t));
                 unexecuted.remove(t.id());
             }
 
@@ -276,7 +249,6 @@ public class StateMachineReplication implements BabelProtocol {
         primary = expectedPrimary(viewChanged.view());
         stopSuspectTimer();
         currentBatch.clear();
-        bacthed.clear();
 
         if (myselfPrimary()) // the new primary
             unexecuted.values().forEach(this::submitTransaction);   // re-propose what is still pending

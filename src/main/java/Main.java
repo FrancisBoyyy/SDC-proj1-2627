@@ -94,7 +94,7 @@ void main(String[] args) throws IOException, KeyStoreException,
 
     // The replication and dissemination/agreement protocols: replace these by
     // your own protocols.
-    var replicationProtocol = new StateMachineReplication(membership, ledger::isValid,
+    var replicationProtocol = new StateMachineReplication(membership,
             SMRParameters.fromProperties(properties));
     var broadcastProtocol = new PracticalByzantineFaultTolerantProtocol(membership, config.getF());
     var membershipProtocol = new StaticMembershipProtocol(membership,
