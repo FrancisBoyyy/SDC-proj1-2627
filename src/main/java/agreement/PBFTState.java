@@ -19,12 +19,13 @@ public class PBFTState {
     private boolean prepared;
     private boolean commited;
 
-    private SignedProof signedPrePrepare;
-    private final Map<BabelNode, SignedProof> prepares;
+    private ProofEntry signedPrePrepare;
+    private final Map<BabelNode, ProofEntry> prepares;
     private final Map<BabelNode, CommitMessage> commits;
 
     public PBFTState() {
         this.batch = null;
+        this.digest = null;
 
         this.preprepared = false;
         this.prepared = false;
@@ -37,7 +38,7 @@ public class PBFTState {
 
     // aux methods
 
-    public static String operationDigest(List<BabelMessage> batch) {
+    public static String batchDigest(List<BabelMessage> batch) {
         String batchString = Arrays.toString(batch.toArray());
         byte[] hashBytes = Crypto.digest(batchString.getBytes());
         return Crypto.toHex(hashBytes);
@@ -64,9 +65,9 @@ public class PBFTState {
     public void setPrePrepared(PrePrepareMessage msg, BabelNode primary) {
         preprepared = true;
         this.batch =msg.ms();
-        this.digest = operationDigest(msg.ms());
+        this.digest = batchDigest(msg.ms());
 
-        signedPrePrepare = new SignedProof(msg, primary);
+        signedPrePrepare = new ProofEntry(msg, primary);
     }
 
     public void setPrepared() {
@@ -83,7 +84,7 @@ public class PBFTState {
      */
     public void registerPrepare(BabelNode from, PrepareMessage msg) {
         prepares.putIfAbsent(from,
-                new SignedProof(msg, from));
+                new ProofEntry(msg, from));
     }
 
     /**
@@ -95,7 +96,7 @@ public class PBFTState {
             return 0;
 
         int count = 1; // already include the primary pre-prepare
-        for (SignedProof proof : prepares.values()) {
+        for (ProofEntry proof : prepares.values()) {
             if (proof.digest().equals(digest))
                 count++;
         }
@@ -107,11 +108,11 @@ public class PBFTState {
         return prepared;
     }
 
-    /** Only valid once prepared: the PrePrepare, its batch and the Prepares matching its digest. */
     public PreparedProof getProof() {
         return new PreparedProof(
-                signedPrePrepare,
                 batch,
+                signedPrePrepare,
+                // consider only prepares with the same digest as the accepted PrePrepare
                 prepares.values().stream().filter(p -> p.digest().equals(digest)).toList()
         );
     }

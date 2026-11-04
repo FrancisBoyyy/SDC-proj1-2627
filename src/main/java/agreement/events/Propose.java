@@ -11,10 +11,6 @@ import java.util.List;
  * instance. Only the current primary (leader) proposes; the other replicas may
  * ignore this request (or use it to detect that the primary is not doing its
  * job).
- *
- * <p>
- * The value is a {@link BabelMessage} so that it can be sent inside the
- * messages of the agreement protocol. Define your own record for batches.
  */
-public record Propose(List<BabelMessage> values) implements ProtocolEvent {
+public record Propose(List<BabelMessage> batch) implements ProtocolEvent {
 }

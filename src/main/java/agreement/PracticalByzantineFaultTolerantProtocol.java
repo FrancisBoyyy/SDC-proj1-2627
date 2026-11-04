@@ -4,13 +4,7 @@ import agreement.events.Decided;
 import agreement.events.Propose;
 import agreement.events.SuspectPrimary;
 import agreement.events.ViewChanged;
-import agreement.messages.CommitMessage;
-import agreement.messages.PrePrepareMessage;
-import agreement.messages.PrepareMessage;
-import agreement.messages.NewViewMsg;
-import agreement.messages.ViewChangeMsg;
-import agreement.messages.SignedProof;
-import agreement.messages.PreparedProof;
+import agreement.messages.*;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.jspecify.annotations.Nullable;
@@ -43,7 +37,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     private final Map<PBFTInstanceId, PBFTState> instances;
 
-    private long currentView; // TODO : viewChange
+    private long currentView;
     private long currentSeqn; // monotonic increasing sequence number, only for primary usage!
 
     private boolean inViewChange;
@@ -95,6 +89,42 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         this.channel = channel;
     }
 
+    // auxiliary methods
+
+    /**
+     * Sends the given to the membership excluding the given node.
+     */
+    private void sendToNeighbors(BabelMessage message, @Nullable BabelNode exclude) {
+        for (BabelNode node : neighbors)
+            if (!node.equals(exclude))
+                channel.send(node, message);
+    }
+
+    /**
+     * Sends the given message to all of the membership (including the sender).
+     */
+    private void sendToAll(BabelMessage message) {
+        sendToNeighbors(message, null);
+    }
+
+    /**
+     * Sends the given message to the set of neighbors of this replica
+     * (excluding the replica itself...).
+     */
+    private void sendToOthers(BabelMessage m) {
+        sendToNeighbors(m, runtime.getMyself());
+    }
+
+    /**
+     * Returns the node expected to be the primary of the given view.
+     */
+    private BabelNode expectedPrimary(long view) {
+        return neighbors.get(Math.floorMod(view, neighbors.size()));
+    }
+
+    /**
+     * Returns the bytes contents of the given (v, s, d) tuple.
+     */
     private static byte[] bytesOf(String tag, long view, long seqn, String digest) {
         return String.join("|", tag, String.valueOf(view), String.valueOf(seqn), digest).getBytes(StandardCharsets.UTF_8);
     }
@@ -110,27 +140,107 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         return bytesOf("Commit", view, seqn, digest);
     }
 
-    // aux methods
-
-    private BabelNode expectedPrimary(long view) {
-        return neighbors.get(Math.floorMod(view, neighbors.size()));
-    }
-
+    /**
+     * Returns the consensus instance for the given view and sequence number.
+     */
     private PBFTState stateFor(long view, long seqn) {
         PBFTInstanceId id = new PBFTInstanceId(view, seqn);
         return instances.computeIfAbsent(id, ignored -> new PBFTState());
     }
 
-    private void sendToNeighbors(BabelMessage message, @Nullable BabelNode ignore) {
-        for (BabelNode node : neighbors)
-            if (!node.equals(ignore))
-                channel.send(node, message);
+    // NOTIFICATIONS
+
+    /**
+     * Handles the propose, made by the primary.
+     * Selects a monotonic increasing sequence number for the new batch to be ordered across replicas.
+     * Sets the primary state has PrePrepared, since it is not a backup to receive any PrePrepares.
+     * Builds the PrePrepare message containing the client request, that sequence number and
+     * the batch contents digest, signed by the primary, sending it to all replicas
+     */
+    @UponBabelEvent
+    public void uponPropose(Propose propose) throws GeneralSecurityException {
+        List<BabelMessage> batch = propose.batch();
+
+        String hash = PBFTState.batchDigest(batch);
+        currentSeqn++;
+        byte[] sig = Crypto.sign(prePrepareBytes(currentView, currentSeqn, hash), runtime.getKeys().getPrivate());
+        PrePrepareMessage preprepareMsg = new PrePrepareMessage(batch, currentView, currentSeqn, hash, sig);
+
+        PBFTState state = stateFor(preprepareMsg.view(), preprepareMsg.seqn());
+        state.setPrePrepared(preprepareMsg, runtime.getMyself());
+
+        sendToOthers(preprepareMsg);
+
+        LOGGER.info("Receive propose myself (primary) for batch... sending to current membership with (v, n, d)=({}, {}, {})",
+                currentView, currentSeqn, hash);
     }
 
-    private void sendToOthers(BabelMessage m) {
-        sendToNeighbors(m, runtime.getMyself());
+    /**
+     * Handles the PrePrepare message.
+     * A PrePrepare is accepted by a replica if it meets the following criteria:
+     * - the sender must be the primary in the current view
+     * - the current view must be equal to the message's view
+     * - the message's digest must be equal to the hash of the batch's contents
+     * - there is no other PrePrepare message accepted with a different digest
+     * - the signature of the message can be verified with the primary's public key
+     * If all criteria is met, the replica constructs a Prepare message, registers its own Prepare
+     * and forwards it to all its neighbors.
+     */
+    @UponMessageIn
+    public void uponPrePrepareMsg(PrePrepareMessage msg, BabelNode sender) throws GeneralSecurityException {
+        if (inViewChange)
+            return;
+
+        LOGGER.info("Pre-prepare received from {}", sender);
+
+        if (currentView != msg.view()) {
+            LOGGER.warn("currentView={} != msg.view={}", currentView, msg.view());
+            return;
+        }
+
+        if (!sender.equals(expectedPrimary(currentView))) {
+            LOGGER.warn("sender={} is not the primary={}", sender, expectedPrimary(currentView));
+            return;
+        }
+
+        String expectedHash = PBFTState.batchDigest(msg.ms());
+        if (!msg.hash().equals(expectedHash)) {
+            LOGGER.warn("msg.hash()={} != expectedHash={}", msg.hash(), expectedHash);
+            return;
+        }
+
+        PBFTState state = stateFor(msg.view(), msg.seqn());
+        if (!state.canAcceptPrePrepare(expectedHash)) {
+            LOGGER.warn("This replica previously accept a PrePrepare with a different hash.");
+            return;
+        }
+
+        // verify the signature
+        if (!Crypto.verify(prePrepareBytes(msg.view(), msg.seqn(), expectedHash),
+                msg.sig(),
+                ((PublicKeyBabelNode) sender).identity())
+        ) {
+            LOGGER.warn("The signature is not verifiable with the sender's public key.");
+            return;
+        }
+
+        // all conditions verified -> accept the pre-prepare!
+        state.setPrePrepared(msg, sender);
+
+        byte[] sig = Crypto.sign(prepareBytes(msg.view(), msg.seqn(), expectedHash), runtime.getKeys().getPrivate());
+        PrepareMessage prepare = new PrepareMessage(msg.view(), msg.seqn(), expectedHash, sig);
+        LOGGER.info("Accepted PrePrepare -> Prepare {} sent", prepare);
+        state.registerPrepare(runtime.getMyself(), prepare); // own prepare
+        sendToOthers(prepare);
+
+        tryPrepared(state, msg.view(), msg.seqn()); // because other prepares may be buffered
     }
 
+    /**
+     * Tries to reach a prepare byzantine quorum of replicas.
+     * If it is reached, send the corresponding commit to the replica neighbors,
+     * registering the commit locally, also setting the consensus instance as prepared.
+     */
     private void tryPrepared(PBFTState state, long view, long seqn) throws GeneralSecurityException {
         if (state.getPrepareSize() < prepareQuorum)
             return;
@@ -140,10 +250,51 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         byte[] sig = Crypto.sign(commitBytes(view, seqn, state.getDigest()), runtime.getKeys().getPrivate());
         CommitMessage commit = new CommitMessage(view, seqn, state.getDigest(), sig);
         LOGGER.info("Prepares quorum reached -> Commit {} sent", commit);
-        state.registerCommit(runtime.getMyself(), commit);   // own commit
-        sendToNeighbors(commit, null);
+        state.registerCommit(runtime.getMyself(), commit);
+        sendToOthers(commit);
 
-        tryCommitted(state, seqn);   // commits may have arrived before we were prepared
+        tryCommitted(state, seqn);
+    }
+
+
+    /**
+     * Handles receiving a Prepare message.
+     * Registers it and tries to reach a quorum to progress in the protocol.
+     */
+    @UponMessageIn
+    public void uponPrepareMsg(PrepareMessage msg, BabelNode sender) throws GeneralSecurityException {
+        if (sender.equals(expectedPrimary(msg.view())) || inViewChange)
+            return;   // the primary's vote is its PrePrepare
+
+        // verify the signature
+        if (!Crypto.verify(prepareBytes(msg.view(), msg.seqn(), msg.hash()),
+                msg.sig(),
+                ((PublicKeyBabelNode) sender).identity())
+        ) {
+            LOGGER.warn("The signature is not verifiable with the sender's public key.");
+            return;
+        }
+
+        PBFTState state = stateFor(msg.view(), msg.seqn());
+        state.registerPrepare(sender, msg);
+        tryPrepared(state, msg.view(), msg.seqn());
+    }
+
+    @UponMessageIn
+    public void uponCommitMsg(CommitMessage msg, BabelNode sender) {
+        if (inViewChange)
+            return;
+
+        // verify the signature
+        if (!Crypto.verify(commitBytes(msg.view(), msg.seqn(), msg.hash()),
+                msg.sig(),
+                ((PublicKeyBabelNode) sender).identity())
+        )
+            return;
+
+        PBFTState state = stateFor(msg.view(), msg.seqn());
+        state.registerCommit(sender, msg);
+        tryCommitted(state, msg.seqn());
     }
 
     private void tryCommitted(PBFTState state, long seqn) {
@@ -160,146 +311,34 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         runtime.deliverEvent(decided);
     }
 
-    private void processPropose(List<BabelMessage> ms) throws GeneralSecurityException {
-        //handle the propose, send the Pre-Prepare to all replicas containing the propose operation, a seqn,
-        //  currentView and the hash of the propose.value
+    // TIMERS
 
-        String hash = PBFTState.operationDigest(ms);
-        currentSeqn++;
-        byte[] sig = Crypto.sign(prePrepareBytes(currentView, currentSeqn, hash), runtime.getKeys().getPrivate());
-        PrePrepareMessage preprepareMsg = new PrePrepareMessage(ms, currentView, currentSeqn, hash, sig);
-
-        PBFTState state = stateFor(preprepareMsg.view(), preprepareMsg.seqn());
-        state.setPrePrepared(preprepareMsg, runtime.getMyself());
-
-        String batchStr = Arrays.toString(ms.toArray());
-        LOGGER.info("Propose request for {}... sending to current membership with (v, n, d)=({}, {}, {})",
-                batchStr, currentView, currentSeqn, hash);
-        sendToNeighbors(preprepareMsg, runtime.getMyself());
-    }
-
-    @UponBabelEvent
-    public void uponPropose(Propose propose) throws GeneralSecurityException {
-        LOGGER.info("Receive propose myself (primary)");
-        processPropose(propose.values());
-    }
-
-    @UponMessageIn
-    public void uponPrePrepareMsg(PrePrepareMessage msg, BabelNode sender) throws GeneralSecurityException {
-        LOGGER.info("Pre-prepare received from {}", sender);
-
-        // verify the conditions for accepting that PrePrepare:
-        // 1. the sender must be the primary with index in neighbors p = currentView % neighbors.size()
-        // msg = operation, view, seqn and hash. Confirm that
-        //   2.1 hash=Hash(operation),
-        //   2.2 view = currentView
-        //   2.3 instances does not have the entry (view, seqn) with a PBFT state such that false=canAcceptPrePrepare(hash)
-        //   2.4 seqn don't exhaust the number space
-
-        // 2.2
-        if (currentView != msg.view()) {
-            LOGGER.warn("currentView={} != msg.view={}", currentView, msg.view());
-            return;
-        }
-
-        // 1.
-        if (!sender.equals(expectedPrimary(currentView))) {
-            LOGGER.warn("sender={} is not the primary={}", sender, expectedPrimary(currentView));
-            return;
-        }
-
-        // 2.1
-        String expectedHash = PBFTState.operationDigest(msg.ms());
-        if (!msg.hash().equals(expectedHash)) {
-            LOGGER.warn("msg.hash()={} != expectedHash={}", msg.hash(), expectedHash);
-            return;
-        }
-
-        // 2.3
-        PBFTState state = stateFor(msg.view(), msg.seqn());
-        if (!state.canAcceptPrePrepare(expectedHash)) {
-            LOGGER.warn("This replica previously accept a PrePrepare with a different hash.");
-            return;
-        }
-
-        // TODO: 2.4...
-
-        // verify the signature
-        if (!Crypto.verify(prePrepareBytes(msg.view(), msg.seqn(), expectedHash),
-                msg.sig(),
-                ((PublicKeyBabelNode) sender).identity())
-        )
-            return;
-
-        // all conditions verified -> accept the pre-prepare!
-        state.setPrePrepared(msg, sender);
-
-        byte[] sig = Crypto.sign(prepareBytes(msg.view(), msg.seqn(), expectedHash), runtime.getKeys().getPrivate());
-        PrepareMessage prepare = new PrepareMessage(msg.view(), msg.seqn(), expectedHash, sig);
-        LOGGER.info("Accepted PrePrepare -> Prepare {} sent", prepare);
-        state.registerPrepare(runtime.getMyself(), prepare);   // own prepare
-        sendToNeighbors(prepare, null);
-
-        tryPrepared(state, msg.view(), msg.seqn());            // other prepares may be buffered
-    }
-
-    @UponMessageIn
-    public void uponPrepareMsg(PrepareMessage msg, BabelNode sender) throws GeneralSecurityException {
-        if (!neighbors.contains(sender) || sender.equals(expectedPrimary(msg.view())))
-            return;   // the primary's vote is its PrePrepare
-
-        // verify the signature
-        if (!Crypto.verify(prepareBytes(msg.view(), msg.seqn(), msg.hash()),
-                msg.sig(),
-                ((PublicKeyBabelNode) sender).identity())
-        )
-            return;
-
-        PBFTState state = stateFor(msg.view(), msg.seqn());
-        state.registerPrepare(sender, msg);
-        tryPrepared(state, msg.view(), msg.seqn());
-    }
-
-    @UponMessageIn
-    public void uponCommitMsg(CommitMessage msg, BabelNode sender) {
-        if (!neighbors.contains(sender))
-            return;
-
-        // verify the signature
-        if (!Crypto.verify(commitBytes(msg.view(), msg.seqn(), msg.hash()),
-                msg.sig(),
-                ((PublicKeyBabelNode) sender).identity())
-        )
-            return;
-
-        PBFTState state = stateFor(msg.view(), msg.seqn());
-        state.registerCommit(sender, msg);
-        tryCommitted(state, msg.seqn());
-    }
-
-
-    // ---------------------------------------------------------------- view change
-
-    private static byte[] viewChangeBytes(long newView, List<PreparedProof> proofs) {
-        StringBuilder sb = new StringBuilder("ViewChange|").append(newView);
-        for (PreparedProof p : proofs) {
-            SignedProof pp = p.preprepare();
-            sb.append('|').append(pp.view()).append(':').append(pp.seqn()).append(':').append(pp.digest());
-        }
-        return sb.toString().getBytes(StandardCharsets.UTF_8);
-    }
-
+    /**
+     * Handler of the timer that fires when the primary is suspected to be faulty.
+     */
     @UponBabelEvent
     public void uponSuspectPrimary(SuspectPrimary suspect) throws GeneralSecurityException {
         if (suspect.view() == currentView && !inViewChange)
             startViewChange(currentView + 1);
     }
 
-    private void startViewChange(long newView) throws GeneralSecurityException {
-        inViewChange = true;
-        pendingView = newView;
+    // view change
 
-        // P: for each seqn, the prepared proof of the highest view (nothing is garbage collected: no checkpoints)
+    private static byte[] viewChangeBytes(long newView, List<PreparedProof> proofs) {
+        StringBuilder sb = new StringBuilder("ViewChange|").append(newView);
+        for (PreparedProof p : proofs) {
+            ProofEntry entry = p.preprepare();
+            sb.append('|').append(entry.view()).append(':').append(entry.seqn()).append(':').append(entry.digest());
+        }
+
+        return sb.toString().getBytes(StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Returns the set P of the paper, containing all proofs of requests that reached the prepared state at this replica.
+     * If there are many vouching for the same sequence number, only ones from the latest view are relevant.
+     */
+    private List<PreparedProof> getSetP() {
         Map<Long, PreparedProof> best = new TreeMap<>();
         for (PBFTState state : instances.values()) {
             if (!state.isPrepared())
@@ -308,11 +347,20 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             best.merge(proof.preprepare().seqn(), proof,
                     (a, b) -> a.preprepare().view() >= b.preprepare().view() ? a : b);
         }
-        List<PreparedProof> proofs = List.copyOf(best.values());
 
-        byte[] sig = Crypto.sign(viewChangeBytes(newView, proofs), runtime.getKeys().getPrivate());
-        ViewChangeMsg vc = new ViewChangeMsg(newView, proofs, runtime.getMyself(), sig);
-        LOGGER.info("Starting view change to view {} with {} prepared proofs", newView, proofs.size());
+        return List.copyOf(best.values());
+    }
+
+    private void startViewChange(long newView) throws GeneralSecurityException {
+        inViewChange = true;
+        pendingView = newView;
+
+        // P: for each seqn, the prepared proof of the highest view (nothing is garbage collected: no checkpoints)
+        List<PreparedProof> setP = getSetP();
+
+        byte[] sig = Crypto.sign(viewChangeBytes(newView, setP), runtime.getKeys().getPrivate());
+        ViewChangeMsg vc = new ViewChangeMsg(newView, setP, runtime.getMyself(), sig);
+        LOGGER.info("Starting view change to view {} with {} prepared proofs", newView, setP.size());
 
         viewChanges.computeIfAbsent(newView, k -> new HashMap<>()).put(runtime.getMyself(), vc);
         sendToOthers(vc);
@@ -321,11 +369,11 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     }
 
     private boolean validateProof(PreparedProof proof) {
-        SignedProof pp = proof.preprepare();
+        ProofEntry pp = proof.preprepare();
         if (!neighbors.contains(pp.sender()) || !pp.sender().equals(expectedPrimary(pp.view())))
             return false;
 
-        if (!pp.digest().equals(PBFTState.operationDigest(proof.ms())))
+        if (!pp.digest().equals(PBFTState.batchDigest(proof.batch())))
             return false;
 
         if (!Crypto.verify(prePrepareBytes(pp.view(), pp.seqn(), pp.digest()),
@@ -334,11 +382,11 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             return false;
 
         Set<BabelNode> signers = new HashSet<>();
-        for (SignedProof p : proof.prepares()) {
+        for (ProofEntry p : proof.prepares()) {
             if (p.view() != pp.view() || p.seqn() != pp.seqn() || !p.digest().equals(pp.digest()))
                 return false;
             // only backups, each counted once (the primary's vote is its PrePrepare)
-            if (!neighbors.contains(p.sender()) || p.sender().equals(pp.sender()) || !signers.add(p.sender()))
+            if (p.sender().equals(pp.sender()) || !signers.add(p.sender()))
                 return false;
             if (!Crypto.verify(prepareBytes(p.view(), p.seqn(), p.digest()),
                     p.signature(),
@@ -350,9 +398,6 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     }
 
     private boolean validateViewChange(ViewChangeMsg vc) {
-        if (!neighbors.contains(vc.sender()))
-            return false;
-
         if (!Crypto.verify(viewChangeBytes(vc.newView(), vc.proofs()),
                 vc.sig(),
                 ((PublicKeyBabelNode) vc.sender()).identity()))
@@ -371,8 +416,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     @UponMessageIn
     public void uponViewChangeMsg(ViewChangeMsg msg, BabelNode sender) throws GeneralSecurityException {
-        if (!neighbors.contains(sender) || !sender.equals(msg.sender())
-                || msg.newView() <= currentView || !validateViewChange(msg))
+        if (!sender.equals(msg.sender()) || msg.newView() <= currentView || !validateViewChange(msg))
             return;
 
         var votes = viewChanges.computeIfAbsent(msg.newView(), k -> new HashMap<>());
@@ -405,7 +449,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         SortedMap<Long, List<BabelMessage>> chosen = new TreeMap<>();
         for (long s = minS + 1; s <= maxS; s++) {
             PreparedProof proof = best.get(s);
-            chosen.put(s, proof != null ? proof.ms() : List.of());
+            chosen.put(s, proof != null ? proof.batch() : List.of());
         }
         return chosen;
     }
@@ -416,7 +460,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         for (var entry : chooseBatches(msgs).entrySet()) {
             long seqn = entry.getKey();
             List<BabelMessage> batch = entry.getValue();
-            String digest = PBFTState.operationDigest(batch);
+            String digest = PBFTState.batchDigest(batch);
             byte[] sig = Crypto.sign(prePrepareBytes(view, seqn, digest), runtime.getKeys().getPrivate());
             o.add(new PrePrepareMessage(batch, view, seqn, digest, sig));
         }
@@ -465,9 +509,9 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         int i = 0;
         for (var entry : expected.entrySet()) {
             PrePrepareMessage pp = msg.o().get(i++);
-            String digest = PBFTState.operationDigest(entry.getValue());
+            String digest = PBFTState.batchDigest(entry.getValue());
             if (pp.view() != view || pp.seqn() != entry.getKey()
-                    || !pp.hash().equals(digest) || !digest.equals(PBFTState.operationDigest(pp.ms()))
+                    || !pp.hash().equals(digest) || !digest.equals(PBFTState.batchDigest(pp.ms()))
                     || !Crypto.verify(prePrepareBytes(view, pp.seqn(), digest), pp.sig(),
                             ((PublicKeyBabelNode) sender).identity())) {
                 LOGGER.warn("NewView for view {} has a wrong O at seqn {}", view, entry.getKey());
@@ -502,7 +546,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             byte[] sig = Crypto.sign(prepareBytes(view, pp.seqn(), pp.hash()), runtime.getKeys().getPrivate());
             PrepareMessage prepare = new PrepareMessage(view, pp.seqn(), pp.hash(), sig);
             state.registerPrepare(runtime.getMyself(), prepare);
-            sendToNeighbors(prepare, null);
+            sendToOthers(prepare);
             tryPrepared(state, view, pp.seqn());   // prepares of this view may have been buffered
         }
         currentSeqn = Math.max(currentSeqn, maxS); // the new primary continues after O
