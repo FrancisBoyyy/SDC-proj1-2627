@@ -29,20 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 /**
- * Placeholder for the replication protocol, so that the application can be
- * executed (and tested with the client) before you implement anything.
- *
- * <p>
- * This logic is evidently incorrect: transfers are executed locally, as soon
- * as they are submitted, without being propagated to (or ordered with) the
- * other replicas. Replace this protocol by:
- * <ul>
- * <li>a simple replication protocol that uses Byzantine Reliable Broadcast
- * (variant a);</li>
- * <li>a State Machine Replication protocol that uses PBFT (variant b);</li>
- * <li>a blockchain protocol that uses Byzantine Reliable Broadcast to
- * disseminate blocks (variant c).</li>
- * </ul>
+ * State Machine Replication protocol that uses PBFT (variant b).
  */
 public class StateMachineReplication implements BabelProtocol {
     private static final Logger LOGGER = LogManager.getLogger(StateMachineReplication.class);
@@ -53,13 +40,12 @@ public class StateMachineReplication implements BabelProtocol {
     private List<BabelMessage> currentBatch;
     private @Nullable ScheduledFuture<?> batchTimer;
 
-    private final Map<String, Transfer> unexecuted;
-    private final Set<String> executed;
+    private final Map<String, Transfer> unexecuted; // transfers that were not executed yet (all replicas)
+    private final Set<String> executed; // executed transfers (all replicas)
     private @Nullable ScheduledFuture<?> suspectTimer;
-    private long suspectTimeout;
-    private long view;
+    private long currentView;
 
-    private final Set<String> submitted; // already submitted operations to Agreement protocol
+    private final Set<String> bacthed; // already bacthed transfers to Agreement protocol (primary)
     private long nextSeqn;
     private final TreeMap<Long, List<Transfer>> pending;
     private BabelNode primary;
@@ -75,14 +61,12 @@ public class StateMachineReplication implements BabelProtocol {
 
         this.params = params;
 
-        this.suspectTimeout = params.suspectTimeout();
-
         this.currentBatch = new LinkedList<>();
-        this.view = 0L; // by convention!
+        this.currentView = 0L; // by convention!
 
         this.unexecuted  = new HashMap<>();
         this.executed = new HashSet<>();
-        this.submitted = new HashSet<>();
+        this.bacthed = new HashSet<>();
         this.nextSeqn = 1L; // the first seqn conventioned to be executed
         this.pending = new TreeMap<>();
 
@@ -101,19 +85,45 @@ public class StateMachineReplication implements BabelProtocol {
         this.suspectTimer = null;
     }
 
-    private record DecidedTransferBatch(List<Transfer> ms, long seqn) {}
+    // auxiliary methods
 
+    /**
+     * Returns the expected primary for the given view.
+     */
+    private BabelNode expectedPrimary(long view) {
+        return membership.get(Math.floorMod(view, membership.size()));
+    }
+
+    /**
+     * Evaluates if I am the current primary
+     * @return true if I am the current primary, false otherwise.
+     */
     private boolean myselfPrimary() {
         return runtime.getMyself().equals(primary);
     }
 
+    /**
+     * Evaluates if the given transfer can be executed!
+     */
+    private boolean canExecute(Transfer transfer) {
+        return !executed.contains(transfer.id());
+    }
+
+    // TIMERS
+
+    /**
+     * Start the suspect timer for the primary being faulty.
+     */
     private void startSuspectTimer() {
         if (suspectTimer != null || myselfPrimary())
             return;
 
-        suspectTimer = runtime.setUpTimer(new SuspectTimer(view), suspectTimeout, TimeUnit.MILLISECONDS);
+        suspectTimer = runtime.setUpTimer(new SuspectTimer(currentView), params.suspectTimeout(), TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * Stop the suspect timer for the primary being faulty.
+     */
     private void stopSuspectTimer() {
         if (suspectTimer != null) {
             suspectTimer.cancel(false);
@@ -121,43 +131,45 @@ public class StateMachineReplication implements BabelProtocol {
         }
     }
 
+    /**
+     * Handler for the suspect timer.
+     * When it fires, notifies the underlying protocol that the primary is being suspected as faulty
+     * for the current view number.
+     */
+    @UponBabelEvent
+    public void uponSuspectTimer(SuspectTimer timer) {
+        suspectTimer = null;
+        if (timer.view() < currentView)
+            return; // stale timer
+
+        LOGGER.warn("Request timeout in view {}, suspecting that primary {} is faulty", currentView, primary);
+        runtime.deliverEvent(new SuspectPrimary(currentView));
+    }
+
+    /**
+     * Fires when there is no activity from the clients, so submit the current catch as it is (incomplete).
+     */
     @UponBabelEvent
     public void uponBatchTimer(BatchTimer timer) {
         batchTimer = null;
         submitCurrentBatch();
     }
 
-    @UponBabelEvent
-    public void uponSuspectTimer(SuspectTimer timer) {
-        suspectTimer = null;
-        if (timer.view() != view)
-            return; // stale timer
+    // NOTIFICATIONS
 
-        LOGGER.warn("Request timeout in view {}, suspecting primary", view);
-        runtime.deliverEvent(new SuspectPrimary(view));  // PBFT handles it
-    }
-
-    @UponBabelEvent
-    public void uponViewChanged(ViewChanged viewChanged) {
-        view = viewChanged.view();
-        primary = membership.get(Math.floorMod(view, membership.size()));
-        stopSuspectTimer();
-        suspectTimeout *= 2; // back off after each view change
-        currentBatch.clear();
-        submitted.clear();
-
-        if (myselfPrimary()) {
-            unexecuted.values().forEach(this::submitTransaction);   // re-propose what is still pending
-        } else {
-            unexecuted.values().forEach(t -> channel.send(primary, new ProposeMsg(t)));
-            startSuspectTimer();
-        }
-    }
-
+    /**
+     * App level transfer submissions. They need to be ordered before indicating them
+     * back to the application.
+     * If that transfer id were already executed, returns immediately (preventing double spending).
+     * Submit the transaction if the replica is the primary, otherwise
+     * redirects it to the current primary while logging the transfer as unexecuted.
+     */
     @UponBabelEvent
     public void uponSubmitTransaction(SubmitTransaction submit) {
         Transfer transfer = submit.transfer();
-        if (executed.contains(transfer.id())) return;
+
+        if (!canExecute(transfer))
+            return;
 
         if (unexecuted.putIfAbsent(transfer.id(), transfer) == null)
             startSuspectTimer();
@@ -169,22 +181,30 @@ public class StateMachineReplication implements BabelProtocol {
             channel.send(primary, new ProposeMsg(transfer));
     }
 
+    /**
+     * Submits the given transfer to the underlying agreement protocol within a batch of transfers.
+     * When the batch reaches a specific threshold, flushes that list of transfers as one single operation.
+     * Otherwise, adds the transfer to the current batch being formed, reducing the overhead of consensus.
+     * Already batched operations are not batched again, enforcing the "no double spending" criteria.
+     * The batch timer is set up when building a new batch.
+     * @param transfer the given transfer to order.
+     */
     private void submitTransaction(Transfer transfer) {
-        if (submitted.add(transfer.id())) {
+        if (bacthed.add(transfer.id())) {
             currentBatch.add(transfer);
             if (currentBatch.size() == 1)
                 batchTimer = runtime.setUpTimer(new BatchTimer(), params.batchTimeout(), TimeUnit.MILLISECONDS);
         }
+
         if (currentBatch.size() >= params.batchSize())
             submitCurrentBatch();
     }
 
-    @UponMessageIn
-    public void uponProposeMsg(ProposeMsg propose, BabelNode sender) {
-        LOGGER.info("Receive propose from replica {}", sender);
-        submitTransaction(propose.value());
-    }
-
+    /**
+     * Proposes the current batch to agreement,
+     * clearing it for a new batch to be formed.
+     * The batch timer is canceled.
+     */
     private void submitCurrentBatch() {
         if (batchTimer != null) {
             batchTimer.cancel(false);
@@ -192,24 +212,43 @@ public class StateMachineReplication implements BabelProtocol {
         }
 
         if (currentBatch.isEmpty())
-            return;
+            return; // preventing ordering empty batches, ideally not happening ever
 
         runtime.deliverEvent(new Propose(new ArrayList<>(currentBatch)));
         currentBatch.clear();
     }
 
-    private void markExecuted(Transfer transfer) {
-        unexecuted.remove(transfer.id());
-        executed.add(transfer.id());
+    /**
+     * When receiving an ordered batch from the Agreement protocol, proceed as follows:
+     * - if the sequence number is old, ignore it (already on a posterior phase);
+     * - unfold the batch and deliver the transfers in the List order (all the same for each replica),
+     * if they are not yet executed and are valid transfers.
+     */
+    @UponBabelEvent
+    public void uponDeliverTransfer(Decided decided) {
+        if (decided.sqn() < nextSeqn)
+            return;
+
+        List<Transfer> batch = decided.batch().stream().map(m -> (Transfer) m).toList();
+
+        pending.putIfAbsent(decided.sqn(), batch);
+        decidePending(); // decide that transfer by in pending (in case holes were detected)
     }
 
-    private void deliverPending() {
+    /**
+     * Decide pending operations, those received when the next sequence number were not respected.
+     */
+    private void decidePending() {
         List<Transfer> next;
         boolean progress = false;
         while ((next = pending.remove(nextSeqn)) != null) {
             for (Transfer t : next) {
-                runtime.deliverEvent(new ExecuteTransaction(t));
-                markExecuted(t);
+                if (canExecute(t) && validTransfer.test(t)) {
+                    runtime.deliverEvent(new ExecuteTransaction(t));
+                    executed.add(t.id());
+                }
+
+                unexecuted.remove(t.id());
             }
 
             nextSeqn++;
@@ -225,22 +264,38 @@ public class StateMachineReplication implements BabelProtocol {
             startSuspectTimer();
     }
 
+    /**
+     * Upon a view change from the underlying layer, the replica installs the new view, elects the primary and resets primary failure detection.
+     * It discards outdated batch state (if there was one at all) and resubmits all unexecuted requests,
+     * either proposing them directly if the replica is the new primary,
+     * or by forwarding them to the new primary while monitoring its health.
+     */
     @UponBabelEvent
-    public void uponDeliverTransfer(Decided decided) {
-        if (decided.sqn() < nextSeqn)
-            return;
+    public void uponViewChanged(ViewChanged viewChanged) {
+        currentView = viewChanged.view();
+        primary = expectedPrimary(viewChanged.view());
+        stopSuspectTimer();
+        currentBatch.clear();
+        bacthed.clear();
 
-        List<Transfer> batch = new ArrayList<>();
-        for (BabelMessage m : decided.batch()) {
-            Transfer t = (Transfer) m;
-            if (validTransfer.test(t))
-                batch.add(t); // if validTransfer remains deterministic, all replicas will converge to the same state
+        if (myselfPrimary()) // the new primary
+            unexecuted.values().forEach(this::submitTransaction);   // re-propose what is still pending
 
-            else
-                LOGGER.warn("Ignoring invalid transfer {} in batch {}", t.id(), decided.sqn());
+        else {
+            unexecuted.values().forEach(t -> channel.send(primary, new ProposeMsg(t)));
+            startSuspectTimer();
         }
+    }
 
-        pending.putIfAbsent(decided.sqn(), batch);
-        deliverPending();
+    // MESSAGES
+
+    /**
+     * In case a replica forward the transaction to the primary,
+     * the primary submits the transaction as a normal upper layer indication
+     */
+    @UponMessageIn
+    public void uponProposeMsg(ProposeMsg propose, BabelNode sender) {
+        LOGGER.info("Receive propose from replica {}", sender);
+        submitTransaction(propose.value());
     }
 }
