@@ -1,5 +1,6 @@
 import java.security.cert.CertificateException;
 
+import agreement.PBFTParameters;
 import agreement.PracticalByzantineFaultTolerantProtocol;
 import app.PaymentService;
 import app.ledger.Ledger;
@@ -96,7 +97,8 @@ void main(String[] args) throws IOException, KeyStoreException,
     // your own protocols.
     var replicationProtocol = new StateMachineReplication(membership,
             SMRParameters.fromProperties(properties));
-    var broadcastProtocol = new PracticalByzantineFaultTolerantProtocol(membership, config.getF());
+    var broadcastProtocol = new PracticalByzantineFaultTolerantProtocol(membership, config.getF(),
+            PBFTParameters.fromProperties(properties));
     var membershipProtocol = new StaticMembershipProtocol(membership,
             Long.parseLong(properties.getProperty("reconnect_interval", "1000")));
 

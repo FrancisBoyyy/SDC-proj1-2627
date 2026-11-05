@@ -32,6 +32,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     private final List<BabelNode> neighbors;
 
+    private final PBFTParameters params;
+
     private final int prepareQuorum;
     private final int commitQuorum;
     private final int newViewQuorum;
@@ -45,11 +47,10 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private boolean inViewChange;
     private long pendingView; // the view wanted to move to
     private final Map<Long, Map<BabelNode, ViewChangeMsg>> viewChanges;
-    private @Nullable ScheduledFuture<?> viewChangeTimer;
 
     // CHECKPOINT
-    private static final long CHECKPOINT_INTERVAL = 50; // K
-    private static final long LOG_SIZE = 2 * CHECKPOINT_INTERVAL; // L (multiple of K): water marks are (h, h + L]
+    //private static final long CHECKPOINT_INTERVAL = 50; // K
+    //private static final long LOG_SIZE = 2 * CHECKPOINT_INTERVAL; // L (multiple of K): water marks are (h, h + L]
     private final int checkpointQuorum; // = 2f + 1, set in the constructor
     private long lastStableSeqn = 0;
     private List<CheckpointMsg> stableProof = List.of();
@@ -59,10 +60,10 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private final Map<Long, Map<BabelNode, CheckpointMsg>> checkpointVotes = new HashMap<>();
 
     // CHECKPOINT STATE TRANSFER
-    private static final long RETAIN = 3 * CHECKPOINT_INTERVAL;
-    private static final long FETCH_RANGE_CAP = RETAIN;
-    private static final long FETCH_GRACE_MS = 300;
-    private static final long FETCH_RETRY_MS = 1000;
+    //private static final long RETAIN = 3 * CHECKPOINT_INTERVAL;
+    //private static final long FETCH_RANGE_CAP = RETAIN;
+    //private static final long FETCH_GRACE_MS = 300;
+    //private static final long FETCH_RETRY_MS = 1000;
     private long lastCollected = 0;
     private @Nullable ScheduledFuture<?> fetchTimer;
     private final TreeMap<Long, List<BabelMessage>> decidedLog = new TreeMap<>();  // retained for serving fetches
@@ -83,17 +84,20 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private Babel runtime;
     private BabelChannel channel;
 
-    public PracticalByzantineFaultTolerantProtocol(List<BabelNode> membership, int f) {
+    public PracticalByzantineFaultTolerantProtocol(List<BabelNode> membership, int f, PBFTParameters params) {
         if (f < 0 || membership.isEmpty() || membership.size() < 3 * f + 1)
             throw new IllegalArgumentException(
                     "Require distinct replicas, f >= 0, and N >= 3f + 1");
 
         this.neighbors = new ArrayList<>(membership);
 
+        this.params = params;
+
         this.prepareQuorum = 2*f + 1; // the implementation includes the primary in the quorum threshold
         this.commitQuorum = 2*f + 1;
         this.newViewQuorum = 2*f + 1;
         this.amplificationQuorum = f + 1;
+        this.checkpointQuorum = 2*f + 1;
 
         this.instances = new HashMap<>();
 
@@ -102,8 +106,6 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         this.inViewChange = false;
         this.viewChanges = new HashMap<>();
-
-        this.checkpointQuorum = 2*f + 1;
     }
 
     @Override
@@ -177,7 +179,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
      * primary legitimately sent, and nothing retransmits them.
      */
     private boolean aboveHighWaterMark(long seqn) {
-        return seqn > lastStableSeqn + LOG_SIZE;
+        return seqn > lastStableSeqn + params.logSize();
     }
 
     /**
@@ -366,7 +368,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     public void uponFetchMsg(FetchMsg msg, BabelNode sender) {
         if (!neighbors.contains(sender) || sender.equals(runtime.getMyself())
                 || msg.fromSeqn() < 1 || msg.toSeqn() < msg.fromSeqn()
-                || msg.toSeqn() - msg.fromSeqn() >= FETCH_RANGE_CAP) return;
+                || msg.toSeqn() - msg.fromSeqn() >= params.fetchRangeCap()) return;
 
         var batches = new ArrayList<List<BabelMessage>>();
         for (long s = msg.fromSeqn(); s <= msg.toSeqn(); s++) {
@@ -417,7 +419,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         lastCollected = seqn;
         instances.keySet().removeIf(id -> id.seqn() <= seqn);
         decidedDigests.keySet().removeIf(s -> s <= seqn);
-        decidedLog.headMap(seqn - RETAIN, true).clear();
+        decidedLog.headMap(seqn - params.retain(), true).clear();
     }
 
     private void tryCommitted(PBFTState state, long seqn) throws GeneralSecurityException {
@@ -451,7 +453,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         while ((d = decidedDigests.remove(executedUpTo + 1)) != null) {
             executedUpTo++;
             chainDigest = chainStep(chainDigest, d);
-            if (executedUpTo % CHECKPOINT_INTERVAL == 0) {
+            if (executedUpTo % params.checkpointInterval() == 0) {
                 byte[] sig = Crypto.sign(checkpointBytes(executedUpTo, chainDigest), runtime.getKeys().getPrivate());
                 CheckpointMsg cp = new CheckpointMsg(executedUpTo, chainDigest, runtime.getMyself(), sig);
                 registerCheckpoint(cp);
@@ -466,7 +468,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     @UponMessageIn
     public void uponCheckpointMsg(CheckpointMsg msg, BabelNode sender) {
         if (!sender.equals(msg.sender()) || !neighbors.contains(sender)
-                || msg.seqn() <= lastStableSeqn || msg.seqn() % CHECKPOINT_INTERVAL != 0)
+                || msg.seqn() <= lastStableSeqn || msg.seqn() % params.checkpointInterval() != 0)
             return;
         if (!Crypto.verify(checkpointBytes(msg.seqn(), msg.digest()), msg.sig(),
                 ((PublicKeyBabelNode) sender).identity()))
@@ -509,7 +511,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         transferDigest = stableProof.get(0).digest();
         transferPeers = stableProof.stream().map(CheckpointMsg::sender).toList();
         transferAttempt = 0;
-        armFetchTimer(FETCH_GRACE_MS);   // fetch only if we have not caught up by then
+        armFetchTimer(params.fetchGraceTime());   // fetch only if we have not caught up by then
     }
 
     private void requestFetch() {
@@ -521,7 +523,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         LOGGER.info("Fetching seqns [{}, {}] from replica {} (attempt {})",
                 executedUpTo + 1, transferTarget, neighbors.indexOf(peer), transferAttempt);
         channel.send(peer, new FetchMsg(executedUpTo + 1, transferTarget));
-        armFetchTimer(FETCH_RETRY_MS);
+        armFetchTimer(params.fetchRetryTime());
     }
 
     private void armFetchTimer(long delayMs) {
