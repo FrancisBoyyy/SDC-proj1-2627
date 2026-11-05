@@ -593,10 +593,29 @@
     \label{subsec:eval-blockchain}
     \subsubsection{Performance: P1--P5}
 
-    The Blockchain performance scenarios are P1, client-count load; P2,
-    confirmation depth $k$; P3, maximum block capacity; P4, proof-of-work
-    difficulty; and P5, replica-count scaling. P6 is the timed disruption and
-    recovery study, reported with the safety observations below.
+    Table~\ref{tab:blockchain-p-scenarios} defines the six Blockchain
+    performance and disruption scenarios. P6 outcomes are reported with the
+    safety observations below because its primary checks are recovery and
+    replica-state convergence.
+
+    \begin{table*}[t]
+        \centering
+        \small
+        \caption{Blockchain P1--P6 scenario definitions and primary measurements.}
+        \label{tab:blockchain-p-scenarios}
+        \begin{tabular}{p{0.9cm}p{4.1cm}p{9.7cm}}
+            \toprule
+            \textbf{ID} & \textbf{Scenario} & \textbf{Variation and primary measurements} \\
+            \midrule
+            P1 & Client load & Logical clients: 1, 5, 10, 20, 50; successful transfer responses/s, p50/p95 latency and failures/timeouts. \\
+            P2 & Confirmation depth & $k=0,1,2,4$; throughput and client response latency as confirmation depth changes. \\
+            P3 & Block capacity & Maximum transfers per block: 1, 10, 50, 100; response throughput and latency. \\
+            P4 & Proof-of-work difficulty & 16, 18, 20 leading-zero bits; throughput, latency and failed/timed-out requests. \\
+            P5 & Replica-count scaling & Four versus seven replicas under the recorded client and resource settings; throughput and latency. \\
+            P6 & Timed disruption and recovery & Replica crash and 10-second node4 egress-loss schedules; client outcomes, supply conservation and final digest convergence. \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
 
     Table~\ref{tab:blockchain-performance} reports the full client-side
     performance sweeps. At four replicas, increasing the closed-loop client
@@ -756,7 +775,7 @@
         \begin{tikzpicture}
             \begin{groupplot}[
                 group style={group size=2 by 2, horizontal sep=1.35cm,
-                    vertical sep=0.9cm},
+                    vertical sep=1.2cm},
                 width=0.44\textwidth,
                 height=4.0cm,
                 grid=major,
@@ -771,6 +790,7 @@
                     xlabel={Logical clients}, ylabel={Successful responses/s},
                     xmode=log, log basis x=10,
                     xmin=0.8, xmax=60, xtick={1,5,10,20,50},
+                    xticklabels={1,5,10,20,50},
                     ymin=0, ymax=95
                 ]
                 \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
@@ -786,6 +806,7 @@
                     xlabel={Logical clients}, ylabel={Transfer latency (ms)},
                     xmode=log, log basis x=10,
                     xmin=0.8, xmax=60, xtick={1,5,10,20,50},
+                    xticklabels={1,5,10,20,50},
                     ymode=log, ymin=50, ymax=2500,
                     legend style={font=\scriptsize, at={(0.03,0.97)},
                         anchor=north west}
@@ -808,11 +829,11 @@
                 \addlegendentry{p95}
 
                 \nextgroupplot[
-                    title={Block capacity},
                     xlabel={Maximum transfers per block},
                     ylabel={Successful responses/s},
                     xmode=log, log basis x=10,
                     xmin=0.8, xmax=120, xtick={1,10,50,100},
+                    xticklabels={1,10,50,100},
                     ymin=0, ymax=50
                 ]
                 \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
@@ -823,11 +844,11 @@
                 };
 
                 \nextgroupplot[
-                    title={Block capacity},
                     xlabel={Maximum transfers per block},
                     ylabel={Median latency (ms)},
                     xmode=log, log basis x=10,
                     xmin=0.8, xmax=120, xtick={1,10,50,100},
+                    xticklabels={1,10,50,100},
                     ymin=0, ymax=160
                 ]
                 \addplot+[teal!70!black, error bars/.cd, y dir=both, y explicit] coordinates {
@@ -851,11 +872,27 @@
     \subsubsection{Safety: S1--S6}
     \label{subsec:eval-blockchain-safety}
 
-    The Blockchain safety scenarios are S1, valid and invalid block/transfer
-    validation; S2, duplicate and out-of-order block delivery; S3, competing
-    forks before finality; S4, a fork that challenges a transfer after it is
-    executed; S5, Byzantine miner behavior; and S6, conflicting transfers from
-    shared accounts. P6 tests recovery after a timed crash or network disruption.
+    Table~\ref{tab:blockchain-s-scenarios} defines the Blockchain safety
+    scenarios referenced in the results below.
+
+    \begin{table*}[t]
+        \centering
+        \small
+        \caption{Blockchain S1--S6 safety scenario definitions and checks.}
+        \label{tab:blockchain-s-scenarios}
+        \begin{tabular}{p{0.9cm}p{4.0cm}p{9.8cm}}
+            \toprule
+            \textbf{ID} & \textbf{Scenario} & \textbf{Primary check} \\
+            \midrule
+            S1 & Valid and invalid blocks/transfers & Reject invalid proof of work, parent, height, size, signature or duplicate transfer; ensure later valid input can still be accepted. \\
+            S2 & Duplicate and out-of-order delivery & Redeliver blocks and deliver a child before its parent; check idempotence and orphan attachment. \\
+            S3 & Competing forks before finality & Deliver competing valid branches in different orders; check deterministic fork choice and convergence. \\
+            S4 & Fork after payment execution & Challenge a branch containing an executed transfer; record chain choice and the no-rollback conflict. \\
+            S5 & Byzantine miner behavior & Withhold blocks, disseminate invalid blocks or selectively send competing valid blocks within the fault bound. \\
+            S6 & Shared-account conflicts & Issue concurrent transfers for the same account sequence; reconcile executed IDs, balances and replica digests. \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
 
     \paragraph{S1--S3: Validation, delivery order and pre-finality forks.}
     Deterministic Blockchain tests cover invalid proof of work, malformed
@@ -1060,6 +1097,7 @@
                     xlabel={Logical clients}, ylabel={Transfer operations/s},
                     xmode=log, log basis x=10,
                     xmin=0.8, xmax=60, xtick={1,5,10,20,50},
+                    xticklabels={1,5,10,20,50},
                     ymin=0, ymax=440
                 ]
                 \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
@@ -1075,6 +1113,7 @@
                     xlabel={Logical clients}, ylabel={Median latency (ms)},
                     xmode=log, log basis x=10,
                     xmin=0.8, xmax=60, xtick={1,5,10,20,50},
+                    xticklabels={1,5,10,20,50},
                     ymin=0, ymax=110
                 ]
                 \addplot+[teal!70!black, error bars/.cd, y dir=both, y explicit] coordinates {
@@ -1086,7 +1125,6 @@
                 };
 
                 \nextgroupplot[
-                    title={Shared-account contention},
                     xlabel={Transfers to shared accounts (\%)},
                     ylabel={Completed operations/s},
                     xmin=-5, xmax=105, xtick={0,50,100}, ymin=0, ymax=430
@@ -1098,7 +1136,6 @@
                 };
 
                 \nextgroupplot[
-                    title={Shared-account outcomes},
                     xlabel={Transfers to shared accounts (\%)},
                     ylabel={Client-reported failed results (\%)},
                     xmin=-5, xmax=105, xtick={0,50,100}, ymin=0, ymax=70
