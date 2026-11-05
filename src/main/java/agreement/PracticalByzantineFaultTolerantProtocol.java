@@ -46,6 +46,16 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private @Nullable ScheduledFuture<?> viewChangeTimer;
     private final Set<Long> decidedSeqns; // to not emit Decided twice!
 
+    private static final long CHECKPOINT_INTERVAL = 5; // K, tune this
+    private final int checkpointQuorum; // = 2f + 1, set in the constructor
+
+    private long lastStableSeqn = 0;
+    private List<CheckpointMsg> stableProof = List.of();
+    private long executedUpTo = 0; // highest contiguous decided seqn
+    private String chainDigest = ""; // digest of the decided history up to executedUpTo
+    private final Map<Long, String> decidedDigests = new HashMap<>(); // decided but not yet "executed"
+    private final Map<Long, Map<BabelNode, CheckpointMsg>> checkpointVotes = new HashMap<>();
+
     /**
      * Relevant objects to communicate with the Babel 2 framework.
      * The runtime object is for intra machine protocol communication. The channel
@@ -77,6 +87,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         this.inViewChange = false;
         this.viewChanges = new HashMap<>();
         this.decidedSeqns = new HashSet<>();
+
+        this.checkpointQuorum = 2*f + 1;
     }
 
     @Override
@@ -191,6 +203,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         if (inViewChange)
             return;
 
+        if (msg.seqn() <= lastStableSeqn) return;
+
         LOGGER.info("Pre-prepare received from {}", sender);
 
         if (currentView != msg.view()) {
@@ -266,6 +280,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         if (sender.equals(expectedPrimary(msg.view())) || inViewChange)
             return;   // the primary's vote is its PrePrepare
 
+        if (msg.seqn() <= lastStableSeqn) return;
+
         // verify the signature
         if (!Crypto.verify(prepareBytes(msg.view(), msg.seqn(), msg.hash()),
                 msg.sig(),
@@ -281,9 +297,11 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     }
 
     @UponMessageIn
-    public void uponCommitMsg(CommitMessage msg, BabelNode sender) {
+    public void uponCommitMsg(CommitMessage msg, BabelNode sender) throws GeneralSecurityException {
         if (inViewChange)
             return;
+
+        if (msg.seqn() <= lastStableSeqn) return;
 
         // verify the signature
         if (!Crypto.verify(commitBytes(msg.view(), msg.seqn(), msg.hash()),
@@ -297,7 +315,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         tryCommitted(state, msg.seqn());
     }
 
-    private void tryCommitted(PBFTState state, long seqn) {
+    private void tryCommitted(PBFTState state, long seqn) throws GeneralSecurityException {
         if (state.getCommitSize() < commitQuorum)
             return;
 
@@ -309,6 +327,60 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         Decided decided = new Decided(seqn, state.getBatch());
         LOGGER.info("Commits quorum reached -> Decide {} sent to SMR", decided);
         runtime.deliverEvent(decided);
+        decidedDigests.put(seqn, state.getDigest());
+        advanceCheckpoints();
+    }
+
+    private static byte[] checkpointBytes(long seqn, String digest) {
+        return ("Checkpoint|" + seqn + "|" + digest).getBytes(StandardCharsets.UTF_8);
+    }
+
+    private void advanceCheckpoints() throws GeneralSecurityException {
+        String d;
+        while ((d = decidedDigests.remove(executedUpTo + 1)) != null) {
+            executedUpTo++;
+            chainDigest = Crypto.toHex(Crypto.digest((chainDigest + "|" + d).getBytes(StandardCharsets.UTF_8)));
+            if (executedUpTo % CHECKPOINT_INTERVAL == 0) {
+                byte[] sig = Crypto.sign(checkpointBytes(executedUpTo, chainDigest), runtime.getKeys().getPrivate());
+                CheckpointMsg cp = new CheckpointMsg(executedUpTo, chainDigest, runtime.getMyself(), sig);
+                registerCheckpoint(cp);
+                sendToOthers(cp);
+            }
+        }
+    }
+
+    @UponMessageIn
+    public void uponCheckpointMsg(CheckpointMsg msg, BabelNode sender) {
+        if (!sender.equals(msg.sender()) || !neighbors.contains(sender)
+                || msg.seqn() <= lastStableSeqn || msg.seqn() % CHECKPOINT_INTERVAL != 0)
+            return;
+        if (!Crypto.verify(checkpointBytes(msg.seqn(), msg.digest()), msg.sig(),
+                ((PublicKeyBabelNode) sender).identity()))
+            return;
+        registerCheckpoint(msg);   // deliberately not gated by inViewChange
+    }
+
+    private void registerCheckpoint(CheckpointMsg cp) {
+        if (cp.seqn() <= lastStableSeqn) return;
+        var votes = checkpointVotes.computeIfAbsent(cp.seqn(), k -> new HashMap<>());
+        votes.putIfAbsent(cp.sender(), cp);
+
+        List<CheckpointMsg> matching = votes.values().stream()
+                .filter(c -> c.digest().equals(cp.digest())).toList();
+        if (matching.size() >= checkpointQuorum)
+            makeStable(cp.seqn(), matching);
+    }
+
+    private void makeStable(long seqn, List<CheckpointMsg> proof) {
+        if (seqn <= lastStableSeqn) return;
+        executedUpTo = Math.max(executedUpTo, seqn);
+        lastStableSeqn = seqn;
+        stableProof = List.copyOf(proof);
+        checkpointVotes.keySet().removeIf(s -> s <= seqn);
+        instances.keySet().removeIf(id -> id.seqn() <= seqn);
+        decidedSeqns.removeIf(s -> s <= seqn);
+        decidedDigests.keySet().removeIf(s -> s <= seqn);
+        LOGGER.info("Stable checkpoint at seqn {}", seqn);
     }
 
     // TIMERS
@@ -324,8 +396,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     // view change
 
-    private static byte[] viewChangeBytes(long newView, List<PreparedProof> proofs) {
-        StringBuilder sb = new StringBuilder("ViewChange|").append(newView);
+    private static byte[] viewChangeBytes(long newView, long stableSeqn, List<PreparedProof> proofs) {
+        StringBuilder sb = new StringBuilder("ViewChange|").append(newView).append('|').append(stableSeqn);
         for (PreparedProof p : proofs) {
             ProofEntry entry = p.preprepare();
             sb.append('|').append(entry.view()).append(':').append(entry.seqn()).append(':').append(entry.digest());
@@ -341,7 +413,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private List<PreparedProof> getSetP() {
         Map<Long, PreparedProof> best = new TreeMap<>();
         for (PBFTState state : instances.values()) {
-            if (!state.isPrepared())
+            if (!state.isPrepared() || state.getProof().preprepare().seqn() <= lastStableSeqn)
                 continue;
             PreparedProof proof = state.getProof();
             best.merge(proof.preprepare().seqn(), proof,
@@ -358,8 +430,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         // P: for each seqn, the prepared proof of the highest view (nothing is garbage collected: no checkpoints)
         List<PreparedProof> setP = getSetP();
 
-        byte[] sig = Crypto.sign(viewChangeBytes(newView, setP), runtime.getKeys().getPrivate());
-        ViewChangeMsg vc = new ViewChangeMsg(newView, setP, runtime.getMyself(), sig);
+        byte[] sig = Crypto.sign(viewChangeBytes(newView, lastStableSeqn, setP), runtime.getKeys().getPrivate());
+        ViewChangeMsg vc = new ViewChangeMsg(newView, lastStableSeqn, stableProof, setP, runtime.getMyself(), sig);
         LOGGER.info("Starting view change to view {} with {} prepared proofs", newView, setP.size());
 
         viewChanges.computeIfAbsent(newView, k -> new HashMap<>()).put(runtime.getMyself(), vc);
@@ -398,20 +470,48 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     }
 
     private boolean validateViewChange(ViewChangeMsg vc) {
-        if (!Crypto.verify(viewChangeBytes(vc.newView(), vc.proofs()),
-                vc.sig(),
+        if (!Crypto.verify(viewChangeBytes(vc.newView(), vc.stableSeqn(), vc.proofs()), vc.sig(),
                 ((PublicKeyBabelNode) vc.sender()).identity()))
+            return false;
+        if (!validateStable(vc.stableSeqn(), vc.checkpointProof()))
             return false;
 
         Set<Long> seqns = new HashSet<>();
         for (PreparedProof proof : vc.proofs()) {
+            long s = proof.preprepare().seqn();
             // one proof per seqn, and it must come from a view older than the one being installed
-            if (!seqns.add(proof.preprepare().seqn()) || proof.preprepare().view() >= vc.newView())
+            if (s <= vc.stableSeqn() || !seqns.add(s) || proof.preprepare().view() >= vc.newView())
                 return false;
             if (!validateProof(proof))
                 return false;
         }
         return true;
+    }
+
+    private void adoptStableCheckpoint(Collection<ViewChangeMsg> msgs) {
+        ViewChangeMsg best = null;
+        for (ViewChangeMsg vc : msgs)
+            if (vc.stableSeqn() > lastStableSeqn && (best == null || vc.stableSeqn() > best.stableSeqn()))
+                best = vc;
+        if (best != null)
+            makeStable(best.stableSeqn(), best.checkpointProof());
+    }
+
+    private boolean validateStable(long seqn, List<CheckpointMsg> proof) {
+        if (seqn == 0) return proof.isEmpty();
+        if (proof.isEmpty()) return false;
+
+        String digest = proof.get(0).digest();
+        Set<BabelNode> signers = new HashSet<>();
+        for (CheckpointMsg cp : proof) {
+            if (cp.seqn() != seqn || !cp.digest().equals(digest)
+                    || !neighbors.contains(cp.sender()) || !signers.add(cp.sender()))
+                return false;
+            if (!Crypto.verify(checkpointBytes(seqn, digest), cp.sig(),
+                    ((PublicKeyBabelNode) cp.sender()).identity()))
+                return false;
+        }
+        return signers.size() >= checkpointQuorum;
     }
 
     @UponMessageIn
@@ -437,10 +537,14 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private SortedMap<Long, List<BabelMessage>> chooseBatches(Collection<ViewChangeMsg> msgs) {
         Map<Long, PreparedProof> best = new HashMap<>();
         long minS = 0L;
+        for (ViewChangeMsg msg : msgs)
+            minS = Math.max(minS, msg.stableSeqn());
+
         long maxS = minS;
         for (ViewChangeMsg msg : msgs) {
             for (PreparedProof proof : msg.proofs()) {
                 long seqn = proof.preprepare().seqn();
+                if (seqn <= minS) continue;
                 maxS = Math.max(maxS, seqn);
                 best.merge(seqn, proof, (a, b) -> a.preprepare().view() >= b.preprepare().view() ? a : b);
             }
@@ -481,6 +585,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         NewViewMsg nv = new NewViewMsg(newView, proofs, o);
         LOGGER.info("Sending NewView for view {} with {} PrePrepares in O", newView, o.size());
         sendToOthers(nv);
+        adoptStableCheckpoint(proofs);
         installView(newView, o);
     }
 
@@ -519,6 +624,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             }
         }
 
+        adoptStableCheckpoint(msg.viewChanges());
         installView(view, msg.o());
     }
 
@@ -534,7 +640,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         inViewChange = false;
         viewChanges.keySet().removeIf(v -> v <= view);
 
-        long maxS = 0L;
+        long maxS = lastStableSeqn;
         for (PrePrepareMessage pp : o) {
             maxS = Math.max(maxS, pp.seqn());
             PBFTState state = stateFor(view, pp.seqn());
