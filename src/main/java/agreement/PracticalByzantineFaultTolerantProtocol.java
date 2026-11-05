@@ -46,10 +46,10 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private long pendingView; // the view wanted to move to
     private final Map<Long, Map<BabelNode, ViewChangeMsg>> viewChanges;
     private @Nullable ScheduledFuture<?> viewChangeTimer;
-    private final Set<Long> decidedSeqns; // to not emit Decided twice!
 
     // CHECKPOINT
     private static final long CHECKPOINT_INTERVAL = 50; // K
+    private static final long LOG_SIZE = 2 * CHECKPOINT_INTERVAL; // L (multiple of K): water marks are (h, h + L]
     private final int checkpointQuorum; // = 2f + 1, set in the constructor
     private long lastStableSeqn = 0;
     private List<CheckpointMsg> stableProof = List.of();
@@ -58,7 +58,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private final Map<Long, String> decidedDigests = new HashMap<>(); // decided but not yet "executed"
     private final Map<Long, Map<BabelNode, CheckpointMsg>> checkpointVotes = new HashMap<>();
 
-    // CHECKPOIT FETCH
+    // CHECKPOINT STATE TRANSFER
     private static final long RETAIN = 3 * CHECKPOINT_INTERVAL;
     private static final long FETCH_RANGE_CAP = RETAIN;
     private static final long FETCH_GRACE_MS = 300;
@@ -66,6 +66,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private long lastCollected = 0;
     private @Nullable ScheduledFuture<?> fetchTimer;
     private final TreeMap<Long, List<BabelMessage>> decidedLog = new TreeMap<>();  // retained for serving fetches
+    private final Deque<List<BabelMessage>> deferredBatches = new ArrayDeque<>(); // primary: waiting for window space
     private long transferTarget = 0;        // 0 = no transfer in progress
     private String transferDigest;
     private List<BabelNode> transferPeers;  // the signers of the stable proof
@@ -101,7 +102,6 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         this.inViewChange = false;
         this.viewChanges = new HashMap<>();
-        this.decidedSeqns = new HashSet<>();
 
         this.checkpointQuorum = 2*f + 1;
     }
@@ -172,6 +172,15 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     }
 
     /**
+     * High water mark H = h + L, h being the last stable checkpoint. Only the primary enforces it (throttling its
+     * proposals): a backup that is slower to stabilize a checkpoint would otherwise silently drop PrePrepares the
+     * primary legitimately sent, and nothing retransmits them.
+     */
+    private boolean aboveHighWaterMark(long seqn) {
+        return seqn > lastStableSeqn + LOG_SIZE;
+    }
+
+    /**
      * Returns the consensus instance for the given view and sequence number.
      */
     private PBFTState stateFor(long view, long seqn) {
@@ -190,8 +199,27 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
      */
     @UponBabelEvent
     public void uponPropose(Propose propose) throws GeneralSecurityException {
-        List<BabelMessage> batch = propose.batch();
+        // dropped batches are re-proposed by the SMR layer upon ViewChanged
+        if (inViewChange || !expectedPrimary(currentView).equals(runtime.getMyself()))
+            return;
 
+        deferredBatches.add(propose.batch());
+        proposeDeferred();
+    }
+
+    /**
+     * Proposes the batches that fit in the water mark window; the rest wait for the next stable checkpoint.
+     */
+    private void proposeDeferred() throws GeneralSecurityException {
+        if (inViewChange || !expectedPrimary(currentView).equals(runtime.getMyself()))
+            return;
+
+        List<BabelMessage> batch;
+        while (!aboveHighWaterMark(currentSeqn + 1) && (batch = deferredBatches.poll()) != null)
+            propose(batch);
+    }
+
+    private void propose(List<BabelMessage> batch) throws GeneralSecurityException {
         String hash = PBFTState.batchDigest(batch);
         currentSeqn++;
         byte[] sig = Crypto.sign(prePrepareBytes(currentView, currentSeqn, hash), runtime.getKeys().getPrivate());
@@ -223,7 +251,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             return;
 
         if (isObsolete(msg.seqn())) return;
-        
+
         LOGGER.info("Pre-prepare received from {}", sender);
 
         if (currentView != msg.view()) {
@@ -321,7 +349,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             return;
 
         if (isObsolete(msg.seqn())) return;
-        
+
         // verify the signature
         if (!Crypto.verify(commitBytes(msg.view(), msg.seqn(), msg.hash()),
                 msg.sig(),
@@ -340,7 +368,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
                 || msg.fromSeqn() < 1 || msg.toSeqn() < msg.fromSeqn()
                 || msg.toSeqn() - msg.fromSeqn() >= FETCH_RANGE_CAP) return;
 
-        var entries = new ArrayList<BatchEntry>();
+        var batches = new ArrayList<List<BabelMessage>>();
         for (long s = msg.fromSeqn(); s <= msg.toSeqn(); s++) {
             List<BabelMessage> batch = decidedLog.get(s);
             if (batch == null) {
@@ -348,10 +376,10 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
                         msg.fromSeqn(), msg.toSeqn(), neighbors.indexOf(sender), s);
                 return;
             }
-            entries.add(new BatchEntry(s, batch));
+            batches.add(batch);
         }
         LOGGER.info("Serving fetch [{}, {}] to replica {}", msg.fromSeqn(), msg.toSeqn(), neighbors.indexOf(sender));
-        channel.send(sender, new BatchesMsg(msg.fromSeqn(), entries));
+        channel.send(sender, new BatchesMsg(msg.fromSeqn(), batches));
     }
 
     @UponMessageIn
@@ -361,16 +389,8 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
                 || msg.fromSeqn() + msg.batches().size() - 1 != transferTarget) return;
 
         String chain = chainDigest;
-        long expected = msg.fromSeqn();
-        for (BatchEntry e : msg.batches()) {
-            if (e.seqn() != expected++) {
-                LOGGER.warn("Fetched batches from replica {} are not contiguous, trying another peer", neighbors.indexOf(sender));
-                requestFetch();
-                return;
-            }
-            chain = Crypto.toHex(Crypto.digest(
-                    (chain + "|" + PBFTState.batchDigest(e.batch())).getBytes(StandardCharsets.UTF_8)));
-        }
+        for (List<BabelMessage> batch : msg.batches())
+            chain = chainStep(chain, PBFTState.batchDigest(batch));
         if (!chain.equals(transferDigest)) {
             LOGGER.warn("Fetched batches from replica {} do not match the stable digest, trying another peer",
                     neighbors.indexOf(sender));
@@ -378,9 +398,10 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             return;
         }
 
-        for (BatchEntry e : msg.batches()) {
-            if (decidedSeqns.add(e.seqn())) runtime.deliverEvent(new Decided(e.seqn(), e.batch()));
-            decidedLog.put(e.seqn(), e.batch());
+        long seqn = msg.fromSeqn();
+        for (List<BabelMessage> batch : msg.batches()) {
+            runtime.deliverEvent(new Decided(seqn, batch)); // SMR ignores what it already has
+            decidedLog.put(seqn++, batch);
         }
         long reached = transferTarget;
         executedUpTo = reached;
@@ -395,7 +416,6 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         if (seqn <= lastCollected) return;
         lastCollected = seqn;
         instances.keySet().removeIf(id -> id.seqn() <= seqn);
-        decidedSeqns.removeIf(s -> s <= seqn);
         decidedDigests.keySet().removeIf(s -> s <= seqn);
         decidedLog.headMap(seqn - RETAIN, true).clear();
     }
@@ -406,13 +426,13 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         state.setCommited();
 
-        if (!decidedSeqns.add(seqn))
-            return; // already decided in an earlier view (re-agreed through O)
+        // already executed, or already decided in an earlier view (re-agreed through O)
+        if (seqn <= executedUpTo || decidedDigests.putIfAbsent(seqn, state.getDigest()) != null)
+            return;
 
         Decided decided = new Decided(seqn, state.getBatch());
         LOGGER.info("Commits quorum reached -> Decide {} sent to SMR", decided);
         runtime.deliverEvent(decided);
-        decidedDigests.put(seqn, state.getDigest());
         decidedLog.put(seqn, state.getBatch());
         advanceCheckpoints();
     }
@@ -421,11 +441,16 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         return ("Checkpoint|" + seqn + "|" + digest).getBytes(StandardCharsets.UTF_8);
     }
 
+    /** Extends the digest of the decided history with the digest of the next decided batch. */
+    private static String chainStep(String chain, String batchDigest) {
+        return Crypto.toHex(Crypto.digest((chain + "|" + batchDigest).getBytes(StandardCharsets.UTF_8)));
+    }
+
     private void advanceCheckpoints() throws GeneralSecurityException {
         String d;
         while ((d = decidedDigests.remove(executedUpTo + 1)) != null) {
             executedUpTo++;
-            chainDigest = Crypto.toHex(Crypto.digest((chainDigest + "|" + d).getBytes(StandardCharsets.UTF_8)));
+            chainDigest = chainStep(chainDigest, d);
             if (executedUpTo % CHECKPOINT_INTERVAL == 0) {
                 byte[] sig = Crypto.sign(checkpointBytes(executedUpTo, chainDigest), runtime.getKeys().getPrivate());
                 CheckpointMsg cp = new CheckpointMsg(executedUpTo, chainDigest, runtime.getMyself(), sig);
@@ -469,11 +494,17 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         if (executedUpTo >= seqn) garbageCollect(seqn);
         else startStateTransfer();
+
+        try {
+            proposeDeferred(); // the window moved
+        } catch (GeneralSecurityException e) {
+            LOGGER.error("Could not propose deferred batches", e);
+        }
     }
 
     private void startStateTransfer() {
-        LOGGER.info("State transfer.");
         if (transferTarget != 0 || executedUpTo >= lastStableSeqn) return;
+        LOGGER.info("Behind stable checkpoint {} (executed up to {}): starting state transfer", lastStableSeqn, executedUpTo);
         transferTarget = lastStableSeqn;
         transferDigest = stableProof.get(0).digest();
         transferPeers = stableProof.stream().map(CheckpointMsg::sender).toList();
@@ -554,7 +585,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         inViewChange = true;
         pendingView = newView;
 
-        // P: for each seqn, the prepared proof of the highest view (nothing is garbage collected: no checkpoints)
+        // P: for each seqn above the stable checkpoint, the prepared proof of the highest view
         List<PreparedProof> setP = getSetP();
 
         byte[] sig = Crypto.sign(viewChangeBytes(newView, lastStableSeqn, setP), runtime.getKeys().getPrivate());
@@ -659,7 +690,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     /**
      * For every seqn in (minS, maxS], the batch of the prepared proof with the highest view among the
      * view-changes, or an empty batch (null request) if no replica proved anything for it, so there are no holes.
-     * minS is 0 because there are no checkpoints. Deterministic, so backups can recompute and check it.
+     * minS is the highest stable checkpoint among the view-changes. Deterministic, so backups can recompute and check it.
      */
     private SortedMap<Long, List<BabelMessage>> chooseBatches(Collection<ViewChangeMsg> msgs) {
         Map<Long, PreparedProof> best = new HashMap<>();
@@ -757,7 +788,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
     /**
      * Moves to {@code view} and processes O as if each PrePrepare had been received normally: backups send their
-     * Prepare, so the normal prepare/commit phases run again for them (Decided is deduplicated by decidedSeqns).
+     * Prepare, so the normal prepare/commit phases run again for them (Decided is deduplicated by executedUpTo/decidedDigests).
      */
     private void installView(long view, List<PrePrepareMessage> o) throws GeneralSecurityException {
         BabelNode primary = expectedPrimary(view);
@@ -765,6 +796,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         currentView = view;
         inViewChange = false;
+        deferredBatches.clear(); // SMR re-proposes what is still unexecuted upon ViewChanged
         viewChanges.keySet().removeIf(v -> v <= view);
 
         long maxS = lastStableSeqn;
