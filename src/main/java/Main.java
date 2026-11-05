@@ -8,6 +8,9 @@ import blockchain.BlockchainConfig;
 import blockchain.BlockchainReplicationProtocol;
 import broadcast.ByzantineReliableBroadcastProtocol;
 import membership.StaticMembershipProtocol;
+import replication.BroadcastReplicationProfile;
+import replication.BroadcastReplicationProtocol;
+import pt.unl.fct.di.novasys.babel2.core.BabelProtocol;
 import pt.unl.fct.di.novasys.babel2.channels.DefaultNodeStore;
 import pt.unl.fct.di.novasys.babel2.channels.IPBabelChannel.AuthMode;
 import pt.unl.fct.di.novasys.babel2.channels.tcp_tls.TCPBabelChannel;
@@ -96,13 +99,27 @@ void main(String[] args) throws IOException, KeyStoreException,
             Long.parseLong(properties.getProperty("digest_interval", "5000")),
             auditJournal);
 
-    // The replication and dissemination/agreement protocols: replace these by
-    // your own protocols.
-    var blockchainConfig = BlockchainConfig.from(properties);
-    var blockchainByzantineProfile = BlockchainByzantineProfile.fromProperty(
-            properties.getProperty("blockchain_byzantine_profile", "none"));
-    var replicationProtocol = new BlockchainReplicationProtocol(
-            blockchainConfig, ledger::isValid, blockchainByzantineProfile);
+    // Select the replication variant explicitly. Keep blockchain as the default
+    // so existing configurations continue to run the previously integrated variant.
+    String replicationVariant = properties.getProperty("replication", "blockchain")
+            .trim()
+            .toLowerCase(java.util.Locale.ROOT);
+    BabelProtocol replicationProtocol = switch (replicationVariant) {
+        case "brb", "consensus-free" ->
+                new BroadcastReplicationProtocol(
+                        ledger::isValid,
+                        BroadcastReplicationProfile.fromProperty(
+                                properties.getProperty("brb_byzantine_profile", "none")));
+        case "blockchain" -> {
+            var blockchainConfig = BlockchainConfig.from(properties);
+            var blockchainByzantineProfile = BlockchainByzantineProfile.fromProperty(
+                    properties.getProperty("blockchain_byzantine_profile", "none"));
+            yield new BlockchainReplicationProtocol(
+                    blockchainConfig, ledger::isValid, blockchainByzantineProfile);
+        }
+        default -> throw new IllegalArgumentException(
+                "Unknown replication variant: " + replicationVariant);
+    };
     var broadcastProtocol = new ByzantineReliableBroadcastProtocol(membership, config.getF());
     var membershipProtocol = new StaticMembershipProtocol(membership,
             Long.parseLong(properties.getProperty("reconnect_interval", "1000")));

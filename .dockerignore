@@ -1,0 +1,14 @@
+.git
+.idea
+.vscode
+.settings
+target
+logs
+*.csv
+*.log
+*.zip
+*.pdf
+.DS_Store
+benchmarks/result
+benchmarks/docker/results
+report

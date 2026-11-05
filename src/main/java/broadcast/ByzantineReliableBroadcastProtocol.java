@@ -76,7 +76,7 @@ public class ByzantineReliableBroadcastProtocol
 
     @Override
     public void uponBroadcastRequest(BabelMessage payload) {
-        LOGGER.info("Broadcast request for {}... sending to current membership", payload);
+        LOGGER.debug("Broadcast request for {}... sending to current membership", payload);
         var message = new SendBroadcastMessage(
                 UUID.randomUUID(), runtime.getMyself(), payload);
 
@@ -179,7 +179,7 @@ public class ByzantineReliableBroadcastProtocol
         state.echo = message;
         state.echoes.put(runtime.getMyself(), message);
 
-        LOGGER.info("Sending ECHO for {}", message);
+        LOGGER.debug("Sending ECHO for {}", message);
         sendToNeighbors(new EchoBroadcastMessage(message));
         advance(state, message);
     }
@@ -197,7 +197,7 @@ public class ByzantineReliableBroadcastProtocol
         if (state.ready == null && (echoes >= echoQuorum || readies >= readyQuorum)) {
             state.ready = candidate;
             state.readies.put(runtime.getMyself(), candidate);
-            LOGGER.info("Sending READY for {}", candidate);
+            LOGGER.debug("Sending READY for {}", candidate);
             sendToNeighbors(new ReadyBroadcastMessage(candidate));
         }
 
@@ -206,7 +206,7 @@ public class ByzantineReliableBroadcastProtocol
 
         if (!state.delivered && readies >= deliveryQuorum) {
             state.delivered = true;
-            LOGGER.info("Delivering {}", candidate);
+            LOGGER.debug("Delivering {}", candidate);
             deliverMessage(runtime, candidate.payload(), candidate.origin());
         }
     }
@@ -235,12 +235,12 @@ public class ByzantineReliableBroadcastProtocol
 
         }
 
-        LOGGER.info("NEIGHBOR UP: {}", node);
+        LOGGER.debug("NEIGHBOR UP: {}", node);
     }
 
     @Override
     public void neighbourDown(BabelNode babelNode) {
-        LOGGER.info("NEIGHBOR DOWN: {}", babelNode);
+        LOGGER.debug("NEIGHBOR DOWN: {}", babelNode);
         neighbors.remove(babelNode);
     }
 

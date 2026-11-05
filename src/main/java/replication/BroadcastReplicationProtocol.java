@@ -5,6 +5,7 @@ import java.util.Set;
 import java.util.function.Predicate;
 
 import app.messages.Transfer;
+import broadcast.events.SelectiveBroadcastRequest;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import pt.unl.fct.di.novasys.babel2.annotations.UponBabelEvent;
@@ -25,9 +26,17 @@ public class BroadcastReplicationProtocol implements BroadcastConsumerBabelProto
     private Babel runtime;
 
     private final Predicate<Transfer> validTransfer;
+    private final BroadcastReplicationProfile profile;
 
     public BroadcastReplicationProtocol(Predicate<Transfer> validTransfer) {
+        this(validTransfer, BroadcastReplicationProfile.NONE);
+    }
+
+    public BroadcastReplicationProtocol(
+            Predicate<Transfer> validTransfer,
+            BroadcastReplicationProfile profile) {
         this.validTransfer = validTransfer;
+        this.profile = profile;
     }
 
     @Override
@@ -41,8 +50,13 @@ public class BroadcastReplicationProtocol implements BroadcastConsumerBabelProto
 
         if (!executed.contains(transfer.id())
                 && submitted.add(transfer.id())) {
-            LOGGER.info("Submitting transfer {}", transfer.id());
-            broadcast(runtime, transfer);
+            LOGGER.debug("Submitting transfer {}", transfer.id());
+            if (profile == BroadcastReplicationProfile.SELECTIVE_SEND) {
+                LOGGER.warn("BYZANTINE_ACTION profile=selective_send transfer={}", transfer.id());
+                runtime.deliverEvent(new SelectiveBroadcastRequest(transfer, 2));
+            } else {
+                broadcast(runtime, transfer);
+            }
         }
     }
 
