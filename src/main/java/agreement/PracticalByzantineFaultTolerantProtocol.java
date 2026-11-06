@@ -49,8 +49,6 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     private final Map<Long, Map<BabelNode, ViewChangeMsg>> viewChanges;
 
     // CHECKPOINT
-    //private static final long CHECKPOINT_INTERVAL = 50; // K
-    //private static final long LOG_SIZE = 2 * CHECKPOINT_INTERVAL; // L (multiple of K): water marks are (h, h + L]
     private final int checkpointQuorum;
     private long lastStableSeqn;
     private List<CheckpointMsg> stableProof;
@@ -387,6 +385,23 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         tryCommitted(state, msg.seqn());
     }
 
+    private void tryCommitted(PBFTState state, long seqn) throws GeneralSecurityException {
+        if (state.getCommitSize() < commitQuorum)
+            return;
+
+        state.setCommited();
+
+        // already executed, or already decided in an earlier view (re-agreed through O)
+        if (seqn <= executedUpTo || decidedDigests.putIfAbsent(seqn, state.getDigest()) != null)
+            return;
+
+        Decided decided = new Decided(seqn, state.getBatch());
+        LOGGER.info("Commits quorum reached -> Decide {} sent to SMR", decided);
+        runtime.deliverEvent(decided);
+        decidedLog.put(seqn, state.getBatch());
+        advanceCheckpoints();
+    }
+
     // -----* VIEW CHANGE *------
 
     // aux methods
@@ -508,6 +523,32 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         }
 
         return signers.size() >= prepareQuorum;
+    }
+
+    /**
+     * Validates if the given set of checkpoint messages certify that the checkpoint seqn is stable.
+     * There is need to be at least checkpointQuorum messages with different signatures
+     * vouching for the same stable sequence number.
+     */
+    private boolean validateStable(long seqn, List<CheckpointMsg> proof) {
+        if (seqn == 0)
+            return proof.isEmpty(); // at the start there are no checkpoint messages
+
+        if (proof.isEmpty())
+            return false;
+
+        String digest = proof.getFirst().digest();
+        Set<BabelNode> signers = new HashSet<>();
+        for (CheckpointMsg checkpoint : proof) {
+            if (checkpoint.seqn() != seqn || !checkpoint.digest().equals(digest) || !signers.add(checkpoint.sender()))
+                return false;
+
+            if (!Crypto.verify(checkpointBytes(seqn, digest), checkpoint.sig(),
+                    ((PublicKeyBabelNode) checkpoint.sender()).identity()))
+                return false;
+        }
+
+        return signers.size() >= checkpointQuorum;
     }
 
     /**
@@ -664,28 +705,128 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         currentView = view;
         inViewChange = false;
-        deferredBatches.clear(); // SMR re-proposes what is still unexecuted upon ViewChanged
+        deferredBatches.clear();
         viewChanges.keySet().removeIf(v -> v <= view);
 
         long maxS = lastStableSeqn;
-        for (PrePrepareMessage pp : o) {
-            maxS = Math.max(maxS, pp.seqn());
-            PBFTState state = stateFor(view, pp.seqn());
-            state.setPrePrepared(pp, primary);
+        for (PrePrepareMessage preprepare : o) {
+            maxS = Math.max(maxS, preprepare.seqn());
+            PBFTState state = stateFor(view, preprepare.seqn());
+            state.setPrePrepared(preprepare, primary);
 
             if (primary.equals(runtime.getMyself()))
                 continue;
 
-            byte[] sig = Crypto.sign(prepareBytes(view, pp.seqn(), pp.hash()), runtime.getKeys().getPrivate());
-            PrepareMessage prepare = new PrepareMessage(view, pp.seqn(), pp.hash(), sig);
+            byte[] sig = Crypto.sign(prepareBytes(view, preprepare.seqn(), preprepare.hash()), runtime.getKeys().getPrivate());
+            PrepareMessage prepare = new PrepareMessage(view, preprepare.seqn(), preprepare.hash(), sig);
             state.registerPrepare(runtime.getMyself(), prepare);
             sendToOthers(prepare);
-            tryPrepared(state, view, pp.seqn());   // prepares of this view may have been buffered
+            tryPrepared(state, view, preprepare.seqn()); // prepares of this view may have been buffered
         }
         currentSeqn = Math.max(currentSeqn, maxS); // the new primary continues after O
 
         LOGGER.info("Installed view {} (primary {})", view, primary);
         runtime.deliverEvent(new ViewChanged(view, primary));
+    }
+
+    // -----* CHECKPOINTS *------
+
+    // aux methods
+
+    /**
+     * Extends the digest of the decided history with the digest of the next decided batch.
+     */
+    private static String chainStep(String chain, String batchDigest) {
+        return Crypto.toHex(Crypto.digest((chain + "|" + batchDigest).getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private void advanceCheckpoints() throws GeneralSecurityException {
+        String d;
+        while ((d = decidedDigests.remove(executedUpTo + 1)) != null) {
+            // digests in decidedDigests are for sure decided
+            executedUpTo++;
+            historyDigest = chainStep(historyDigest, d);
+            if (executedUpTo % params.checkpointInterval() == 0) {
+                // after a parameterizable interval, send the checkpoint to all neighbors
+                byte[] sig = Crypto.sign(checkpointBytes(executedUpTo, historyDigest), runtime.getKeys().getPrivate());
+                CheckpointMsg cp = new CheckpointMsg(executedUpTo, historyDigest, runtime.getMyself(), sig);
+                registerCheckpoint(cp);
+                sendToOthers(cp);
+            }
+        }
+
+        if (transferTarget != 0 && executedUpTo >= transferTarget)
+            stopTransfer(); // caught up on our own
+
+        garbageCollect(Math.min(lastStableSeqn, executedUpTo));
+        startStateTransfer();
+    }
+
+    private void adoptStableCheckpoint(Collection<ViewChangeMsg> msgs) {
+        ViewChangeMsg best = null;
+        for (ViewChangeMsg vc : msgs)
+            if (vc.stableSeqn() > lastStableSeqn && (best == null || vc.stableSeqn() > best.stableSeqn()))
+                best = vc;
+
+        if (best != null)
+            makeStable(best.stableSeqn(), best.checkpointProof());
+    }
+
+    private void registerCheckpoint(CheckpointMsg cp) {
+        if (cp.seqn() <= lastStableSeqn)
+            return;
+
+        var votes = checkpointVotes.computeIfAbsent(cp.seqn(), k -> new HashMap<>());
+        votes.putIfAbsent(cp.sender(), cp);
+
+        List<CheckpointMsg> matching = votes.values().stream()
+                .filter(c -> c.digest().equals(cp.digest())).toList();
+
+        if (matching.size() >= checkpointQuorum)
+            makeStable(cp.seqn(), matching);
+    }
+
+    private void makeStable(long seqn, List<CheckpointMsg> proof) {
+        if (seqn <= lastStableSeqn)
+            return;
+
+        LOGGER.info("Stable checkpoint at seqn {} (executed up to {})", seqn, executedUpTo);
+        lastStableSeqn = seqn;
+        stableProof = List.copyOf(proof);
+        checkpointVotes.keySet().removeIf(s -> s <= seqn);
+
+        if (executedUpTo >= seqn)
+            garbageCollect(seqn);
+        else
+            startStateTransfer();
+
+        try {
+            proposeDeferred(); // the window moved
+        } catch (GeneralSecurityException e) {
+            LOGGER.error("Could not propose deferred batches", e);
+        }
+    }
+
+    private void garbageCollect(long seqn) {
+        if (seqn <= lastCollected)
+            return;
+
+        lastCollected = seqn;
+        instances.keySet().removeIf(id -> id.seqn() <= seqn);
+        decidedDigests.keySet().removeIf(s -> s <= seqn);
+        decidedLog.headMap(seqn - params.retain(), true).clear();
+    }
+
+    @UponMessageIn
+    public void uponCheckpointMsg(CheckpointMsg msg, BabelNode sender) {
+        if (!sender.equals(msg.sender()) || !membership.contains(sender) || msg.seqn() <= lastStableSeqn)
+            return;
+
+        if (!Crypto.verify(checkpointBytes(msg.seqn(), msg.digest()), msg.sig(),
+                ((PublicKeyBabelNode) sender).identity()))
+            return;
+
+        registerCheckpoint(msg);
     }
 
 
@@ -740,92 +881,6 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         advanceCheckpoints();
     }
 
-    private void garbageCollect(long seqn) {
-        if (seqn <= lastCollected) return;
-        lastCollected = seqn;
-        instances.keySet().removeIf(id -> id.seqn() <= seqn);
-        decidedDigests.keySet().removeIf(s -> s <= seqn);
-        decidedLog.headMap(seqn - params.retain(), true).clear();
-    }
-
-    private void tryCommitted(PBFTState state, long seqn) throws GeneralSecurityException {
-        if (state.getCommitSize() < commitQuorum)
-            return;
-
-        state.setCommited();
-
-        // already executed, or already decided in an earlier view (re-agreed through O)
-        if (seqn <= executedUpTo || decidedDigests.putIfAbsent(seqn, state.getDigest()) != null)
-            return;
-
-        Decided decided = new Decided(seqn, state.getBatch());
-        LOGGER.info("Commits quorum reached -> Decide {} sent to SMR", decided);
-        runtime.deliverEvent(decided);
-        decidedLog.put(seqn, state.getBatch());
-        advanceCheckpoints();
-    }
-
-    /** Extends the digest of the decided history with the digest of the next decided batch. */
-    private static String chainStep(String chain, String batchDigest) {
-        return Crypto.toHex(Crypto.digest((chain + "|" + batchDigest).getBytes(StandardCharsets.UTF_8)));
-    }
-
-    private void advanceCheckpoints() throws GeneralSecurityException {
-        String d;
-        while ((d = decidedDigests.remove(executedUpTo + 1)) != null) {
-            executedUpTo++;
-            historyDigest = chainStep(historyDigest, d);
-            if (executedUpTo % params.checkpointInterval() == 0) {
-                byte[] sig = Crypto.sign(checkpointBytes(executedUpTo, historyDigest), runtime.getKeys().getPrivate());
-                CheckpointMsg cp = new CheckpointMsg(executedUpTo, historyDigest, runtime.getMyself(), sig);
-                registerCheckpoint(cp);
-                sendToOthers(cp);
-            }
-        }
-        if (transferTarget != 0 && executedUpTo >= transferTarget) stopTransfer();   // caught up on our own
-        garbageCollect(Math.min(lastStableSeqn, executedUpTo));
-        startStateTransfer();
-    }
-
-    @UponMessageIn
-    public void uponCheckpointMsg(CheckpointMsg msg, BabelNode sender) {
-        if (!sender.equals(msg.sender()) || !membership.contains(sender)
-                || msg.seqn() <= lastStableSeqn || msg.seqn() % params.checkpointInterval() != 0)
-            return;
-        if (!Crypto.verify(checkpointBytes(msg.seqn(), msg.digest()), msg.sig(),
-                ((PublicKeyBabelNode) sender).identity()))
-            return;
-        registerCheckpoint(msg);   // deliberately not gated by inViewChange
-    }
-
-    private void registerCheckpoint(CheckpointMsg cp) {
-        if (cp.seqn() <= lastStableSeqn) return;
-        var votes = checkpointVotes.computeIfAbsent(cp.seqn(), k -> new HashMap<>());
-        votes.putIfAbsent(cp.sender(), cp);
-
-        List<CheckpointMsg> matching = votes.values().stream()
-                .filter(c -> c.digest().equals(cp.digest())).toList();
-        if (matching.size() >= checkpointQuorum)
-            makeStable(cp.seqn(), matching);
-    }
-
-    private void makeStable(long seqn, List<CheckpointMsg> proof) {
-        if (seqn <= lastStableSeqn) return;
-        LOGGER.info("Stable checkpoint at seqn {} (executed up to {})", seqn, executedUpTo);
-        lastStableSeqn = seqn;
-        stableProof = List.copyOf(proof);
-        checkpointVotes.keySet().removeIf(s -> s <= seqn);
-
-        if (executedUpTo >= seqn) garbageCollect(seqn);
-        else startStateTransfer();
-
-        try {
-            proposeDeferred(); // the window moved
-        } catch (GeneralSecurityException e) {
-            LOGGER.error("Could not propose deferred batches", e);
-        }
-    }
-
     private void startStateTransfer() {
         if (transferTarget != 0 || executedUpTo >= lastStableSeqn) return;
         LOGGER.info("Behind stable checkpoint {} (executed up to {}): starting state transfer", lastStableSeqn, executedUpTo);
@@ -866,50 +921,4 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         fetchTimer = null;
         requestFetch();
     }
-    
-
-
-    // view change
-
-
-
-    private void adoptStableCheckpoint(Collection<ViewChangeMsg> msgs) {
-        ViewChangeMsg best = null;
-        for (ViewChangeMsg vc : msgs)
-            if (vc.stableSeqn() > lastStableSeqn && (best == null || vc.stableSeqn() > best.stableSeqn()))
-                best = vc;
-
-        if (best != null)
-            makeStable(best.stableSeqn(), best.checkpointProof());
-    }
-
-    /**
-     * Validates if the given set of checkpoint messages certify that the checkpoint seqn is stable.
-     * There is need to be at least checkpointQuorum messages with different signatures
-     * vouching for the same stable sequence number.
-     */
-    private boolean validateStable(long seqn, List<CheckpointMsg> proof) {
-        if (seqn == 0)
-            return proof.isEmpty(); // at the start there are no checkpoint messages
-
-        if (proof.isEmpty())
-            return false;
-
-        String digest = proof.getFirst().digest();
-        Set<BabelNode> signers = new HashSet<>();
-        for (CheckpointMsg checkpoint : proof) {
-            if (checkpoint.seqn() != seqn || !checkpoint.digest().equals(digest) || !signers.add(checkpoint.sender()))
-                return false;
-
-            if (!Crypto.verify(checkpointBytes(seqn, digest), checkpoint.sig(),
-                    ((PublicKeyBabelNode) checkpoint.sender()).identity()))
-                return false;
-        }
-
-        return signers.size() >= checkpointQuorum;
-    }
-
-
-
-
 }
