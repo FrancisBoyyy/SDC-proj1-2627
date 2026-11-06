@@ -9,6 +9,6 @@ import pt.unl.fct.di.novasys.babel2.core.BabelNode;
  * (a multiple of the checkpoint interval); {@code digest} covers the decided history up to {@code seqn}.
  * 2f+1 matching messages make the checkpoint stable and are its proof.
  */
-@BabelIPMessage(id = 308)
+@BabelIPMessage(id = 408)
 public record CheckpointMsg(long seqn, String digest, BabelNode sender, byte[] sig) implements BabelMessage {
 }

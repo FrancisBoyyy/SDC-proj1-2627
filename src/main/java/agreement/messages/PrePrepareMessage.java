@@ -14,6 +14,6 @@ import java.util.List;
 // objects, BabelNode interface, any of the following java collection framework interfaces (List, Map, SortedMap, Set,
 // SortedSet) (deserialized messages from the network will be constructed with immutable versions of the collections),
 // or BabelMessage with a registered serializer (such as the payload below).
-@BabelIPMessage(id = 300)
+@BabelIPMessage(id = 400)
 public record PrePrepareMessage(List<BabelMessage> ms, long view, long seqn, String hash, byte[] sig) implements BabelMessage {
 }

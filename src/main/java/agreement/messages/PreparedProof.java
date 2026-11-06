@@ -11,7 +11,7 @@ import java.util.List;
  * - the batch it refers to, so a new primary can re-propose it
  * - the signed Prepares of 2f distinct backups.
  */
-@BabelIPMessage(id = 306)
+@BabelIPMessage(id = 406)
 public record PreparedProof(List<BabelMessage> batch, ProofEntry preprepare, List<ProofEntry> prepares) implements BabelMessage {
 
 }

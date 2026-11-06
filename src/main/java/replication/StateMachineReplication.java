@@ -267,7 +267,7 @@ public class StateMachineReplication implements BabelProtocol {
      */
     @UponMessageIn
     public void uponProposeMsg(ProposeMsg propose, BabelNode sender) {
-        LOGGER.info("Receive propose from replica {}", sender);
+        LOGGER.debug("Receive propose from replica {}", sender);
         submitTransaction(propose.value());
     }
 }

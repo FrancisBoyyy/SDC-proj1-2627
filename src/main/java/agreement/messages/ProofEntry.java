@@ -4,7 +4,7 @@ import pt.unl.fct.di.novasys.babel2.channels.BabelIPMessage;
 import pt.unl.fct.di.novasys.babel2.channels.BabelMessage;
 import pt.unl.fct.di.novasys.babel2.core.BabelNode;
 
-@BabelIPMessage(id = 305)
+@BabelIPMessage(id = 405)
 public record ProofEntry(long view, long seqn, String digest, BabelNode sender, byte[] signature) implements BabelMessage {
     public ProofEntry(PrePrepareMessage msg, BabelNode from) {
         this(msg.view(), msg.seqn(), msg.hash(), from, msg.sig());

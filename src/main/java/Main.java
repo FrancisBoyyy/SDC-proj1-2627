@@ -1,6 +1,7 @@
 import java.security.cert.CertificateException;
 
 import agreement.PBFTParameters;
+import agreement.PBFTByzantineProfile;
 import agreement.PracticalByzantineFaultTolerantProtocol;
 import app.PaymentService;
 import app.ledger.Ledger;
@@ -115,7 +116,9 @@ void main(String[] args) throws IOException, KeyStoreException,
             replicationProtocol = new StateMachineReplication(
                     membership, SMRParameters.fromProperties(properties));
             broadcastProtocol = new PracticalByzantineFaultTolerantProtocol(
-                    membership, config.getF(), PBFTParameters.fromProperties(properties));
+                    membership, config.getF(), PBFTParameters.fromProperties(properties),
+                    PBFTByzantineProfile.fromProperty(
+                            properties.getProperty("pbft_byzantine_profile", "none")));
         }
         case "brb", "consensus-free" -> {
             replicationProtocol = new BroadcastReplicationProtocol(
