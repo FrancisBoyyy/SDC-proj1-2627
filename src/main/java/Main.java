@@ -4,8 +4,15 @@ import agreement.PBFTParameters;
 import agreement.PracticalByzantineFaultTolerantProtocol;
 import app.PaymentService;
 import app.ledger.Ledger;
+import app.ledger.TransferOutcomeJournal;
+import blockchain.BlockchainByzantineProfile;
+import blockchain.BlockchainConfig;
+import blockchain.BlockchainReplicationProtocol;
 import broadcast.ByzantineReliableBroadcastProtocol;
 import membership.StaticMembershipProtocol;
+import replication.BroadcastReplicationProfile;
+import replication.BroadcastReplicationProtocol;
+import pt.unl.fct.di.novasys.babel2.core.BabelProtocol;
 import pt.unl.fct.di.novasys.babel2.channels.DefaultNodeStore;
 import pt.unl.fct.di.novasys.babel2.channels.IPBabelChannel.AuthMode;
 import pt.unl.fct.di.novasys.babel2.channels.tcp_tls.TCPBabelChannel;
@@ -21,7 +28,6 @@ import pt.unl.fct.di.novasys.babel2.core.membership.MembershipConsumerExtensionF
 import pt.unl.fct.di.novasys.babel2.core.membership.MembershipProviderBabelProtocol;
 import pt.unl.fct.di.novasys.babel2.core.membership.MembershipProviderExtensionFactory;
 import pt.unl.fct.di.novasys.babel2.utils.BabelPropertiesReader;
-import replication.BroadcastReplicationProtocol;
 import replication.SMRParameters;
 import replication.StateMachineReplication;
 import utils.BabelIPComparator;
@@ -90,15 +96,47 @@ void main(String[] args) throws IOException, KeyStoreException,
 
     // The application (the same for all the variants of the project)
     var ledger = new Ledger(config.getAccountOwners(), config.getClientKeys(), config.getInitialBalance());
+    boolean auditEnabled = Boolean.parseBoolean(
+            properties.getProperty("audit_enabled", "false"));
+    var auditJournal = auditEnabled ? new TransferOutcomeJournal() : null;
     var paymentService = new PaymentService(ledger,
-            Long.parseLong(properties.getProperty("digest_interval", "5000")));
+            Long.parseLong(properties.getProperty("digest_interval", "5000")),
+            auditJournal);
 
-    // The replication and dissemination/agreement protocols: replace these by
-    // your own protocols.
-    var replicationProtocol = new StateMachineReplication(membership,
-            SMRParameters.fromProperties(properties));
-    var broadcastProtocol = new PracticalByzantineFaultTolerantProtocol(membership, config.getF(),
-            PBFTParameters.fromProperties(properties));
+    // Select the agreement and replication pair. PBFT uses the SMR layer;
+    // BRB and Blockchain keep their existing dissemination protocol.
+    String replicationVariant = properties.getProperty("replication", "blockchain")
+            .trim()
+            .toLowerCase(java.util.Locale.ROOT);
+    BabelProtocol replicationProtocol;
+    BabelProtocol broadcastProtocol;
+    switch (replicationVariant) {
+        case "pbft" -> {
+            replicationProtocol = new StateMachineReplication(
+                    membership, SMRParameters.fromProperties(properties));
+            broadcastProtocol = new PracticalByzantineFaultTolerantProtocol(
+                    membership, config.getF(), PBFTParameters.fromProperties(properties));
+        }
+        case "brb", "consensus-free" -> {
+            replicationProtocol = new BroadcastReplicationProtocol(
+                    ledger::isValid,
+                    BroadcastReplicationProfile.fromProperty(
+                            properties.getProperty("brb_byzantine_profile", "none")));
+            broadcastProtocol = new ByzantineReliableBroadcastProtocol(
+                    membership, config.getF());
+        }
+        case "blockchain" -> {
+            var blockchainConfig = BlockchainConfig.from(properties);
+            var blockchainByzantineProfile = BlockchainByzantineProfile.fromProperty(
+                    properties.getProperty("blockchain_byzantine_profile", "none"));
+            replicationProtocol = new BlockchainReplicationProtocol(
+                    blockchainConfig, ledger::isValid, blockchainByzantineProfile);
+            broadcastProtocol = new ByzantineReliableBroadcastProtocol(
+                    membership, config.getF());
+        }
+        default -> throw new IllegalArgumentException(
+                "Unknown replication variant: " + replicationVariant);
+    }
     var membershipProtocol = new StaticMembershipProtocol(membership,
             Long.parseLong(properties.getProperty("reconnect_interval", "1000")));
 

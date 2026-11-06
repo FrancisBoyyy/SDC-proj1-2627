@@ -1,0 +1,1299 @@
+%% Report for RDS 26/27 -- Project 1 (Byzantine fault-tolerant payment service)
+%% Based on the ACM `acmart' template (sigconf), as provided by the teacher.
+%%
+%% Working report draft. Empirical results describe the local Docker
+%% evaluation and must not be generalized beyond the stated setup.
+
+\documentclass[sigconf,a4paper]{acmart}
+
+\usepackage{graphicx}
+\usepackage{array}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{pgfplots}
+\usepgfplotslibrary{groupplots}
+\pgfplotsset{compat=1.18}
+
+%% ---------------------------------------------------------------------
+%% Helper macros
+%% ---------------------------------------------------------------------
+% Typesetting of API / message names.
+\newcommand{\api}[1]{\texttt{#1}}
+
+%%
+%% \BibTeX command to typeset BibTeX logo in the docs
+\AtBeginDocument{%
+    \providecommand\BibTeX{{%
+        \normalfont B\kern-0.5em{\scshape i\kern-0.25em b}\kern-0.8em\TeX}}}
+
+%% Rights management information (SAMPLE values from the template).
+\setcopyright{acmcopyright}
+\copyrightyear{2026}
+\acmYear{2026}
+\acmDOI{}
+
+%% Conference information.
+\acmConference[RDS 26/27]{Reliable Distributed Systems 2026/27 -- first project}{2026}{Faculdade de Ciências e Tecnologia, NOVA University of Lisbon, Portugal}
+\acmBooktitle{Reliable Distributed Systems 2026/27 -- first project, Faculdade de Ciências e Tecnologia, NOVA University of Lisbon, Portugal}
+\acmPrice{}
+\acmISBN{}
+
+\begin{document}
+
+    \title[Byzantine Fault-Tolerant Payments]{Byzantine Fault-Tolerant Payments: Consensus-free, PBFT and Blockchain Replication}
+
+    \author{António Mendes}
+    \authornote{Student number 73530. Blockchain development}
+    \email{an.mendes@campus.fct.unl.pt}
+    \affiliation{%
+        \institution{MEI, DI, FCT, UNL}
+        \city{Caparica}
+        \country{Portugal}
+    }
+
+    \author{Francisco Almeida}
+    \authornote{Student number 75116. BRB and State Machine}
+    \email{fs.almeida@campus.fct.unl.pt}
+    \affiliation{%
+        \institution{MEI, DI, FCT, UNL}
+        \city{Caparica}
+        \country{Portugal}
+    }
+
+    \author{Bernardo Gracioso}
+    \authornote{Student number 75486. PBFT and State Machine}
+    \email{b.gracioso@campus.fct.unl.pt}
+    \affiliation{%
+        \institution{MEI, DI, FCT, UNL}
+        \city{Caparica}
+        \country{Portugal}
+    }
+
+    \renewcommand{\shortauthors}{António, Francisco, and Bernardo.}
+
+%% ---------------------------------------------------------------------
+    \begin{abstract}
+        We design, implement and evaluate a replicated payment service that
+        tolerates Byzantine faults in both replicas and clients: a (very)
+        simplified version of the systems that manage account balances in a bank or
+        in a cryptocurrency. The service must guarantee that money is never created
+        or destroyed, that only the owners of an account can spend its funds, and
+        that the same funds are never spent twice. On top of a fixed application
+        layer and the Babel~2 framework, we build three replication solutions with
+        different guarantees: consensus-free payments over Byzantine Reliable
+        Broadcast, which imposes no total order on transfers; state machine
+        replication over PBFT, which yields a consistent total order; and a
+        Proof-of-Work blockchain, where blocks of transfers establish a
+        tamper-evident and eventually consistent order. We argue the correctness of
+        each solution in a partially synchronous system with $n \ge 3f+1$ replicas
+        and aim to compare them in terms of throughput, latency and consistency when
+        accounts are shared by several owners.
+        We evaluate Blockchain and consensus-free BRB in a local Docker
+        environment. For Blockchain, confirmation latency and throughput vary
+        with proof-of-work difficulty and confirmation depth. For BRB, read-only
+        throughput is high, but shared-account contention can leave correct
+        replicas with divergent ledgers because broadcasts have no global order.
+        Blockchain safety experiments also show that irreversible payment
+        execution can conflict with a deep reorganization. These results
+        characterize the implementations and setup; they are not security
+        guarantees for arbitrary schedules or mining-power distributions.
+        \textbf{TODO: add PBFT results and the three-way comparison.}
+    \end{abstract}
+
+    \maketitle
+
+%% ---------------------------------------------------------------------
+    \section{Introduction}
+    \label{sec:intro}
+
+    Systems that manage account balances, such as those of a bank or of a
+    cryptocurrency, must remain available and trustworthy even when some of their
+    components fail or are compromised. Replicating the service tolerates crashes,
+    but when replicas (and clients) can behave arbitrarily, i.e.\ under the
+    Byzantine fault model, the replicated service must still ensure that money is
+    never created or destroyed, that only the owner of an account can spend its
+    funds, and that the same funds are never spent twice (\emph{double spending}).
+
+    This report documents a replicated payment service that lets clients
+    transfer funds from an account they own to any other account, read the
+    balance of an account, and read the history of transfers (outgoing and
+    incoming) of an account.
+
+    It is well known that state machine replication requires consensus to order
+    operations. However, a payment system where each account has a \emph{single
+    owner} does not need consensus: it is enough that all transfers from the same
+    account are executed in the order defined by its owner, and transfers from
+    different accounts commute (in the absence of double-spending attempts)
+    \cite{the-consensus-number-of-a-cryptocurrency}. This result inspired
+    practical systems \cite{online-payments-by-merely-broadcasting-messages}, but
+    stops being true as soon as accounts can be shared by several owners. A
+    central goal of our work is to observe, explain and measure the consequences
+    of this observation.
+
+    To this end, we implemented three replication solutions underneath the same
+    application logic, each with distinct guarantees:
+    \begin{itemize}
+        \item \textbf{Consensus-free payments}, based only on Byzantine Reliable
+        Broadcast \cite{asynchronous-byzantine-agreement-protocols,introduction-to-reliable-and-secure-distributed-programming}
+        between replicas, without a global (total) order on transfers;
+        \item \textbf{PBFT-based payments}, where state machine replication over
+        Practical Byzantine Fault Tolerance \cite{practical-byzantine-fault-tolerance}
+        provides a consistent total order;
+        \item \textbf{Blockchain-based payments}, a replicated blockchain heavily
+        inspired by Bitcoin \cite{bitcoin}, where blocks of transfers establish a
+        tamper-evident and eventually consistent order.
+    \end{itemize}
+    All of them are implemented in Java using Babel~2, the evolution of the Babel
+    framework \cite{babel_framework}.
+
+    The evaluation is designed to compare all three alternatives under the same
+    application and workload. This draft presents local Blockchain and BRB results.
+    \textbf{TODO: add the PBFT results and compare all three protocols here.}
+
+    The remainder of the paper is organized as follows. Section~\ref{sec:background}
+    introduces the payment service and the building blocks we rely on;
+    Section~\ref{sec:model} states the system model and the threats we consider;
+    Section~\ref{sec:impl} describes the architecture and the three solutions;
+    Section~\ref{sec:correctness} argues their correctness;
+    Section~\ref{sec:eval} presents the experimental evaluation; and
+    Section~\ref{sec:conclusion} concludes.
+
+%% ---------------------------------------------------------------------
+    \section{Background}
+    \label{sec:background}
+
+    \subsection{The Payment Service}
+
+    The service manages a fixed set of \emph{accounts}, each with a name, a
+    balance and a set of \emph{owners}. Owners are clients, identified by a public
+    key known to all replicas. In the initial state of the system (the
+    \emph{genesis}), every client owns an account with its own name, a few
+    \emph{shared accounts} are owned by several clients, and all accounts start
+    with the same balance.
+
+    A \emph{transfer} is the operation replicated by the system. It is composed of
+    $\langle from, to, amount, seq, signer\rangle$ and a signature of the signer
+    over these fields. A transfer is \emph{valid} if both accounts exist and are
+    different, the amount is positive, the signer is one of the owners of account
+    $from$, and the signature is correct. Each account has its own sequence of
+    transfers: the transfer of account $A$ with sequence number $s$ can only be
+    executed after the transfers of $A$ with sequence numbers $0,1,\ldots,s-1$.
+    Two different transfers from the same account with the same sequence number
+    are \emph{conflicting}: at most one of them can ever be executed.
+
+    Each replica keeps its state in a deterministic \emph{ledger}. When a valid
+    transfer is handed to the ledger, it is either (i) \emph{executed}, if it is
+    the next transfer of its account and the account has enough funds (which may
+    trigger the execution of other pending transfers); (ii) kept \emph{pending},
+    if previous transfers of the account were not executed yet or the account
+    lacks funds; or (iii) \emph{rejected as a conflict}, if a different transfer of
+    the same account with the same sequence number was handed to the ledger first.
+    If every account has a single (correct) owner, the final ledger state does not
+    depend on the order in which transfers of different accounts are handed to it;
+    with shared accounts, two owners may concurrently issue conflicting transfers,
+    and replicas that see them in different orders diverge.
+
+    \paragraph{Clients.} Since replicas may be Byzantine, a client cannot trust the
+    reply of a single replica (Figure~\ref{fig:client}): it sends each request to
+    all replicas and accepts a result only after receiving $f+1$ matching replies
+    from different replicas, which ensures that at least one correct replica
+    vouches for it. Replicas reply to a transfer once its outcome is known
+    (executed, invalid, or conflicting), while balance and history requests are
+    answered immediately from the replica's local state. To issue a transfer, a
+    client must know the next sequence number of the account: for its own account
+    it simply keeps track of it, while for a shared account it must first read it
+    with a balance request, and other owners may be doing the same concurrently.
+
+    \begin{figure}[t]
+        \centering
+        \resizebox{\linewidth}{!}{%
+            \begin{tikzpicture}[
+                box/.style={draw, minimum width=1.7cm, minimum height=0.65cm, font=\footnotesize, align=center},
+                req/.style={-{Stealth[length=1.8mm]}, thick},
+                rep/.style={-{Stealth[length=1.8mm]}, thick, dashed, green!45!black}
+            ]
+                \node[box, minimum width=3cm] (c) at (3.15,2.4) {Client (owner of account $A$)};
+                \foreach \i/\x in {1/0, 2/2.1, 3/4.2, 4/6.3} {
+                    \node[box] (r\i) at (\x,0) {Replica \i};
+                    \draw[req] ([xshift=-1mm]c.south) -- ([xshift=-1mm]r\i.north);
+                    \draw[rep] ([xshift=1mm]r\i.north) -- ([xshift=1mm]c.south);
+                }
+                \node[font=\scriptsize] at (3.15,-0.75) {Replicas cooperate through the replication protocol ($n\ge 3f+1$)};
+            \end{tikzpicture}}
+        \caption{Interaction between a client and the replicas. Solid arrows: the
+        signed request is sent to all replicas. Dashed arrows: replies; the result
+        is accepted after $f+1$ matching ones.}
+        \Description{A client sends a request to four replicas and accepts the result after f+1 matching replies.}
+        \label{fig:client}
+    \end{figure}
+
+    \subsection{Building Blocks}
+
+    \paragraph{Byzantine Reliable Broadcast (BRB).} BRB
+    \cite{asynchronous-byzantine-agreement-protocols,introduction-to-reliable-and-secure-distributed-programming}
+    lets a process request the broadcast of a message
+    (\api{brbBroadcast(m)}) and notifies the delivery of messages
+    (\api{brbDeliver(p, m)}) such that, even if the sender is Byzantine, all
+    correct processes deliver the same message for a given broadcast instance
+    (\emph{consistency}), if one correct process delivers a message then all
+    correct processes eventually do (\emph{totality}), and a message broadcast by
+    a correct process is eventually delivered by all correct processes
+    (\emph{validity}). BRB does \emph{not} order messages from different
+    instances.
+
+    \paragraph{PBFT.} Practical Byzantine Fault Tolerance
+    \cite{practical-byzantine-fault-tolerance} implements state machine
+    replication with $n \ge 3f+1$ replicas, $f$ of which may be Byzantine. In each
+    view, a primary assigns sequence numbers to (batches of) requests through the
+    pre-prepare, prepare and commit phases; checkpoints bound the log; and a view
+    change replaces a primary suspected to be faulty. Safety holds in asynchronous
+    systems, and liveness requires partial synchrony. In this project the
+    membership is static, so a view change only replaces the primary.
+
+    \paragraph{Proof-of-Work blockchains.} In Bitcoin-style systems
+    \cite{bitcoin}, transfers are grouped into blocks; each block references the
+    hash of the previous block, forming a chain, and includes a proof-of-work (a
+    nonce such that the hash of the block has a given number of leading zeros).
+    Participants adopt the longest valid chain. A block is considered stable once
+    it has $k$ confirmations, so consistency is eventual and, in general,
+    probabilistic.
+
+    \subsection{Babel 2}
+
+    We use Babel~2, the evolution of the Babel framework \cite{babel_framework}
+    developed in the NOVA LINCS laboratory. Protocols are event-driven state
+    machines written in Java, declaring their handlers through annotations;
+    messages are Java records whose serializers are generated automatically; and
+    requests and indications between protocols of the same process are events.
+    Inter-process communication relies on the Netty framework, which the
+    framework hides from the programmer. Channels authenticate the identity of the
+    other side when a connection is established, and a message is delivered to
+    \emph{every} protocol that handles its type, independently of the channel
+    where it was received.
+
+%% ---------------------------------------------------------------------
+    \section{System Model and Threats}
+    \label{sec:model}
+
+    We consider a partially synchronous system under the Byzantine fault model,
+    with a static set of $n \ge 3f+1$ replicas, of which at most $f$ can be
+    Byzantine. Any number of clients can be Byzantine, but a correct client never
+    discloses its private key. Processes communicate through authenticated perfect
+    point-to-point links: the channels provided by Babel~2 verify the identity of
+    the other side when a connection is established, so the sender of every
+    message is authenticated. Whenever a process must convince a third party that
+    some process said something (e.g., to build certificates in PBFT), messages
+    must be explicitly signed. Cryptographic primitives cannot be broken.
+
+    Table~\ref{tab:threats} lists the attacks we considered and how each one is
+    handled (or mitigated) by our solutions.
+
+    \begin{table}[t]
+        \centering
+        \scriptsize
+        \setlength{\tabcolsep}{3pt}
+        \renewcommand{\arraystretch}{1.05}
+        \caption{Threats and protocol treatment.}
+        \label{tab:threats}
+        \begin{tabular}{>{\raggedright\arraybackslash}p{2.05cm}>{\raggedright\arraybackslash}p{5.25cm}}
+            \toprule
+            \textbf{Threat} & \textbf{Handling / mitigation} \\
+            \midrule
+            Unauthorized, altered or replayed transfers
+            & The payment service verifies ownership and signatures; the ledger enforces sequence numbers and duplicate-ID protection. \\
+            \addlinespace
+            Conflicting spends from one account
+            & The ledger accepts at most one transfer for an account sequence. Replicas need a common order to make the same choice. BRB alone gives no total order. \\
+            \addlinespace
+            Byzantine replica equivocation, omission or selective relay
+            & BRB thresholds protect agreement per instance, not ordering across instances. PBFT uses quorum certificates and view changes. Proof of work gives probabilistic chain stability. \\
+            \addlinespace
+            Invalid or conflicting PBFT proposals
+            & Correct replicas validate requests and certificates before execution; view changes are intended to restore progress after a faulty primary. PBFT implementation results are reported separately. \\
+            \addlinespace
+            Invalid blocks, withholding and chain rewrites
+            & Blockchain validation rejects malformed blocks and transfers. Longest-chain selection and $k$ confirmations do not prevent every deep reorganization; executed payments are irreversible. \\
+            \addlinespace
+            Nonmembers, crashes or link loss
+            & Handlers check authenticated membership. Liveness depends on eventual synchrony and enough responsive replicas; finite disruption runs test selected schedules only. \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+
+%% ---------------------------------------------------------------------
+    \section{Architecture and Implementation}
+    \label{sec:impl}
+
+    \subsection{Layering}
+
+    Each replica is composed of three layers (Figure~\ref{fig:arch}): the
+    \emph{payment service} (application logic, provided); a \emph{replication
+    protocol} (simple replication, state machine replication, or blockchain); and
+    a \emph{dissemination/agreement protocol} (Byzantine Reliable Broadcast or
+    PBFT). The BRB protocol is used by two of the alternatives, so it is
+    implemented once and reused. The interfaces between layers are:
+    \begin{itemize}
+        \item payment service $\leftrightarrow$ replication protocol (all variants):
+        request \api{SubmitTransaction}\allowbreak\api{(tx)} and indication
+        \api{ExecuteTransaction}\allowbreak\api{(tx)}, which hands one transfer
+        at a time to the ledger in the required execution order;
+        \item replication protocol $\leftrightarrow$ BRB: request
+        \api{brbBroadcast(m)} and indication \api{brbDeliver(p, m)};
+        \item state machine replication $\leftrightarrow$ PBFT: requests
+        \api{Propose}\allowbreak\api{(batch)} and
+        \api{SuspectPrimary}\allowbreak\api{(view)}, and indications
+        \api{Decided}\allowbreak\api{(sqn, batch)} (in sequence number order,
+        without gaps) and \api{ViewChanged}\allowbreak\api{(view, primary)}.
+    \end{itemize}
+
+    \begin{figure*}[t]
+        \centering
+        \begin{tikzpicture}[
+            layer/.style={draw, rounded corners=1.5pt, minimum width=4.4cm, minimum height=0.75cm, align=center, font=\small, fill=black!4},
+            up/.style={-{Stealth[length=2mm]}, thick, red!70!black},
+            down/.style={-{Stealth[length=2mm]}, thick, green!45!black},
+            both/.style={-{Stealth[length=2mm]}, thick}
+        ]
+            \newcommand{\replicastack}[4]{%
+                \begin{scope}[xshift=#1]
+                \node[layer] (ps) at (0,3.0) {Payment Service};
+                \node[layer] (rp) at (0,1.5) {#2};
+                \node[layer] (dp) at (0,0)   {#3};
+                \draw[up]   ([xshift=-3mm]rp.north) -- ([xshift=-3mm]ps.south);
+                \draw[down] ([xshift=3mm]ps.south)  -- ([xshift=3mm]rp.north);
+                \draw[both] ([xshift=-3mm]dp.north) -- ([xshift=-3mm]rp.south);
+                \draw[both] ([xshift=3mm]rp.south)  -- ([xshift=3mm]dp.north);
+                \node[font=\small\itshape, align=center] at (0,-1.15) {#4};
+                \end{scope}}
+            \replicastack{0cm}{Simple Replication\\Protocol}{Byzantine Reliable\\Broadcast}{(a) Consensus-free payments}
+            \replicastack{5.6cm}{State Machine\\Replication}{PBFT}{(b) State machine replication\\using PBFT}
+            \replicastack{11.2cm}{Blockchain Protocol}{Byzantine Reliable\\Broadcast}{(c) Blockchain\\(Proof-of-Work)}
+        \end{tikzpicture}
+        \caption{Architecture of a replica and its three variants. Between the
+        payment service and the replication protocol, the red upward arrow is the
+        \api{ExecuteTransaction} indication and the green downward arrow is the
+        \api{SubmitTransaction} request; the black arrows are the requests and
+        indications of the dissemination/agreement layer.}
+        \Description{Three layered stacks: payment service on top, a replication protocol in the middle and BRB or PBFT at the bottom.}
+        \label{fig:arch}
+    \end{figure*}
+
+    \subsection{Application Layer}
+
+    The application layer (payment service and ledger) is provided and shared by
+    the three solutions. When a replica receives a valid transfer from a client, it
+    submits it to the replication protocol, and hands it to the ledger only when
+    the replication protocol indicates that it should be executed. As clients send
+    their requests to all replicas, the same transfer is typically submitted by
+    several replicas, and a Byzantine replica or client might submit anything,
+    including old or invalid transfers. The ledger ignores duplicates, but the
+    replication protocols should avoid wasting resources disseminating or ordering
+    the same transfer several times. The application submits each transfer only
+    \emph{once}, so it is the replication protocol's responsibility to ensure that
+    every submitted transfer is eventually executed (e.g., even across view
+    changes). Periodically, the application logs a digest of its state (balances,
+    next sequence numbers and executed transfers of every account): correct
+    replicas that executed the same transfers have the same digest, regardless of
+    the order, which we use to check whether they converged.
+
+    \subsection{Byzantine Reliable Broadcast}
+
+    For a broadcast instance, the origin sends SEND to the replicas. A replica
+    accepts at most one ECHO value from each sender and sends ECHO for the first
+    valid SEND it accepts. It sends READY after receiving
+    $\lfloor(n+f)/2\rfloor+1$ matching ECHOs,
+    or relays READY after receiving $f+1$ matching READY messages. Delivery
+    occurs after $2f+1$ matching READY messages and is recorded once per
+    instance. The thresholds use the configured static membership; messages
+    from non-members are not counted.
+
+    \subsection{Consensus-free Payments}
+
+    In this variant the replication protocol has almost no logic of its own:
+    transfers submitted by the application are handed to BRB, and the replication
+    protocol hands them to the application as soon as they are delivered. Correct
+    replicas eventually deliver the same set of transfers, but no global order is
+    guaranteed.
+
+    The protocol instance is identified by both origin and instance UUID, so
+    equal UUIDs from different origins are distinct instances. Per-sender vote
+    tracking prevents duplicate messages from increasing a threshold. Quorum
+    intersection under $n\geq3f+1$ prevents two correct replicas from delivering
+    different values for one instance. BRB does not order different instances;
+    consequently, it does not resolve concurrent conflicting transfers to a
+    shared account in one global order.
+
+    \subsection{State Machine Replication over PBFT}
+
+    In this variant the replication protocol is a state machine replication layer
+    on top of PBFT. The primary groups transfers into batches and proposes them to
+    PBFT, which establishes a consistent total order; decided batches are executed
+    in sequence number order. When the primary is replaced, pending transfers must
+    not be lost, but eventually ordered and executed: replicas forward transfers
+    to the primary and suspect it (\api{SuspectPrimary}) when transfers are not
+    ordered in due time. Every PBFT message (pre-prepare, prepare, commit,
+    checkpoint, view-change and new-view) is digitally signed by its sender; the
+    MAC/authenticator optimizations of the original paper are not used.
+
+    Batch size, flush timeout, view-change timers and checkpoint garbage
+    collection are implementation parameters that must be reported alongside
+    the PBFT measurements.
+
+    \subsection{Blockchain}
+
+    In this variant the replication protocol groups transfers into blocks. Each
+    block references the hash of the previous block and includes a proof-of-work: a
+    nonce such that the hash of the block has a configurable number of leading
+    zeros. Replicas act as miners and disseminate the blocks they mine through BRB.
+    Each replica validates the blocks it receives, manages its local view of the
+    chain, and adopts the longest valid chain. Once a block is $k$ blocks deep
+    ($k$ is a parameter), its transfers are considered stable and are handed to the
+    application, which never rolls a transfer back; hence a transfer is executed
+    only after $k$ blocks were appended after the block that includes it.
+
+    A block contains a parent hash, height, an ordered list of signed transfers
+    and a nonce. Its hash is computed from a versioned canonical encoding of
+    these fields; proof of work requires the configured number of leading zero
+    bits in the SHA-256 hash. The bounded transaction pool filters invalid and
+    already-finalized transfers and supplies at most the configured block size
+    to an asynchronous miner. Replicas disseminate mined blocks using BRB,
+    validate block size, proof of work, parent, height, transfer validity and
+    duplicate transfer IDs, and retain bounded orphans until their parent is
+    received. Fork choice selects the greatest height, breaking equal-height
+    ties by the lexicographically smaller block hash. The measured configuration
+    uses block size 100, difficulty 16 bits and $k=2$ unless a sweep varies that
+    parameter. A selected-chain block is handed to the application after $k$
+    descendants; once handed off, its effects are irreversible.
+
+%% ---------------------------------------------------------------------
+    \section{Correctness}
+    \label{sec:correctness}
+
+    For each alternative, we argue why correct replicas never execute an invalid
+    transfer, why money is never created or destroyed, and why there is no double
+    spending (or, when that is not the case, under which conditions it can
+    happen and why), in a partially synchronous system under the Byzantine fault
+    model.
+
+    \subsection{Common Ground}
+
+    All variants rely on the payment service to verify account existence,
+    distinct source and destination, positive amount, signer ownership and
+    transfer signature. The ledger applies a transfer only at the next sequence
+    number for its source account and only when sufficient funds are available;
+    it rejects a competing transfer at an already occupied sequence number and
+    debits and credits the same amount. Thus every individual ledger transition
+    preserves total supply and cannot create a negative balance. These local
+    properties do not by themselves ensure that correct replicas choose the
+    same conflicting transfer: that property depends on the replication protocol.
+
+    \subsection{Consensus-free Payments}
+
+    BRB agreement ensures that correct replicas deliver the same value for a
+    given broadcast instance. With a correct single owner issuing a sequence of
+    transfers, each valid transfer is disseminated and the ledger enforces the
+    account sequence, so a later transfer cannot bypass an earlier one. Under
+    eventual synchrony, reliable links and at most $f$ faulty replicas, the BRB
+    thresholds and $n\geq3f+1$ support delivery from a correct origin. This is
+    not a total order across broadcast instances. Concurrent owners of a shared
+    account, or a Byzantine owner issuing conflicting signed transfers, can
+    therefore lead replicas to process conflicts in different orders; the
+    ledger prevents local double execution but the variant does not guarantee
+    global convergence for these cases.
+
+    \subsection{PBFT-based Payments}
+
+    PBFT is intended to provide a common sequence of decided batches. With
+    $n\geq3f+1$, prepare and commit quorums intersect in correct replicas; signed
+    protocol messages let replicas verify the evidence supporting a decision.
+    A correct implementation must validate requests before execution and carry
+    prepared values through view changes, so a faulty primary cannot make
+    correct replicas decide conflicting values for one sequence number. Under
+    partial synchrony, a view change away from an unresponsive primary is the
+    mechanism for restoring progress. These arguments describe the intended
+    PBFT design; implementation-specific validation and experimental evidence
+    must be checked against the completed protocol.
+
+    \subsection{Blockchain-based Payments}
+
+    Replicas add a block to the connected block tree only after checking its
+    proof of work, parent hash, height, size, transfer validity and duplicate
+    transfer IDs. They select the longest valid chain, but do not exchange a
+    consensus certificate for the selected tip. A $k$-deep block is therefore
+    a probabilistic stability heuristic whose security depends on assumptions
+    about relative mining power and network propagation; it is not an absolute
+    finality guarantee. A sufficiently long competing chain can replace the
+    selected chain after a transfer was handed to the payment service. Since
+    the service has no rollback interface, it cannot undo that execution. If
+    conflicting transfers from competing branches have already been handed off
+    at different replicas, their ledgers can diverge even though each local
+    transition preserves supply. Transfers from abandoned blocks that were not
+    yet handed off are not executed by virtue of that branch.
+
+%% ---------------------------------------------------------------------
+    \section{Experimental Evaluation}
+    \label{sec:eval}
+
+    \subsection{Setup}
+
+    Experiments used the supplied Docker setup on one local host, not on the DI
+    and NOVA LINCS cluster. The host was an Apple M5 running macOS 27.0.1; Docker
+    29.9.2 exposed a Linux 7.0.14 VM with 10 CPUs and about 7.9 GiB of memory.
+    Experiment containers used Eclipse Temurin OpenJDK 25.0.5. Replica
+    containers were normally limited to one CPU and 1 GiB each; the seven-
+    replica Blockchain follow-up used 700 MiB per replica. Client containers had
+    no explicit resource limit. Runs used four replicas ($n=4$, $f=1$), except
+    the replica-count sweeps, which also used seven ($n=7$, $f=2$). The $f$
+    value is the tolerated fault bound; performance runs injected no faults
+    unless a fault scenario is named. The retained run manifests record client
+    arguments, protocol parameters, network delay,
+    fault events and container resource limits. Scripts, environment details
+    and raw results are retained locally under the Git-ignored
+    \texttt{benchmarks/} directory.
+
+    The supplied client generates closed-loop workloads: each logical client
+    executes one operation at a time. Runs have preparation, measurement and
+    cooldown periods. Client output includes completed, failed and timed-out
+    operations, throughput, average and percentile latency, per-second
+    completions and divergent replies observed before quorum acceptance.
+    Audited runs record final digests, balances, sequence numbers, executed and
+    pending transfer IDs, and total-supply checks. Completed-operation
+    throughput must not be confused with successfully executed-transfer
+    throughput. Runs were collected sequentially by scenario rather than in a
+    randomized order, and all clients and replicas shared one Docker host;
+    host load and time-dependent effects therefore remain possible confounders.
+    With three runs at most principal settings, means and standard deviations
+    are descriptive summaries, not statistical significance tests.
+
+    \begin{table}[t]
+        \centering
+        \small
+        \caption{Client baseline and parameter sweeps.}
+        \label{tab:params}
+        \begin{tabular}{p{2.6cm}p{4.4cm}}
+            \toprule
+            \textbf{Parameter} & \textbf{Value} \\
+            \midrule
+            Logical clients & 5 baseline; 1, 5, 10, 20, 50 sweep \\
+            Transfer mix & 80\% baseline; 100\% for fork/shared-account runs \\
+            BRB transfer/balance mix & 0/100, 50/50, and 100/0\% \\
+            History / shared mix & 0\% baseline; Blockchain shared runs use 100\% shared; BRB sweep uses 0/50/100\% \\
+            Reply quorum / timeout & $f+1$ / 5000\,ms \\
+            Prepare / run / cooldown & 3000 / 30000 / 5000\,ms baseline \\
+            Added link delay & Blockchain: 1\,ms; BRB: 0\,ms \\
+            Replicas / faults & 4 / 1 baseline; 7 / 2 in replica sweep \\
+            Block size / difficulty / $k$ & 100 / 16 bits / 2 baseline \\
+            Sweeps & $k=0,1,4$; block size $1,10,50,100$; difficulty $16,18,20$ \\
+            Repetitions & 3 per principal setting; selected follow-ups have 6 \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+
+    \subsection{Blockchain evaluation}
+    \label{subsec:eval-blockchain}
+    \subsubsection{Performance: P1--P5}
+
+    Table~\ref{tab:blockchain-p-scenarios} defines the six Blockchain
+    performance and disruption scenarios. P6 outcomes are reported with the
+    safety observations below because its primary checks are recovery and
+    replica-state convergence.
+
+    \begin{table*}[t]
+        \centering
+        \small
+        \caption{Blockchain P1--P6 scenario definitions and primary measurements.}
+        \label{tab:blockchain-p-scenarios}
+        \begin{tabular}{p{0.9cm}p{4.1cm}p{9.7cm}}
+            \toprule
+            \textbf{ID} & \textbf{Scenario} & \textbf{Variation and primary measurements} \\
+            \midrule
+            P1 & Client load & Logical clients: 1, 5, 10, 20, 50; successful transfer responses/s, p50/p95 latency and failures/timeouts. \\
+            P2 & Confirmation depth & $k=0,1,2,4$; throughput and client response latency as confirmation depth changes. \\
+            P3 & Block capacity & Maximum transfers per block: 1, 10, 50, 100; response throughput and latency. \\
+            P4 & Proof-of-work difficulty & 16, 18, 20 leading-zero bits; throughput, latency and failed/timed-out requests. \\
+            P5 & Replica-count scaling & Four versus seven replicas under the recorded client and resource settings; throughput and latency. \\
+            P6 & Timed disruption and recovery & Replica crash and 10-second node4 egress-loss schedules; client outcomes, supply conservation and final digest convergence. \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
+
+    Table~\ref{tab:blockchain-performance} reports the full client-side
+    performance sweeps. At four replicas, increasing the closed-loop client
+    population from 1 to 50 raised successful client-response throughput from
+    $12.67\pm0.72$ to $73.20\pm15.10$ responses/s, while the mean of the per-run
+    medians rose from 69.3 to 552.5\,ms and mean p95 rose from 160 to 1603\,ms.
+    The larger client population therefore raised aggregate throughput while
+    each request took longer; the 50-client point also had high run-to-run
+    variability. These clients issue work as soon as the preceding request
+    completes, so this is a concurrency sweep rather than a fixed arrival-rate
+    or saturation-capacity test.
+
+    Increasing proof-of-work difficulty from 16 to 20 bits reduced the observed
+    successful-response rate from $40.38\pm0.69$ to $2.94\pm0.67$ responses/s
+    and increased mean p50 latency from 105.8 to 1428.1\,ms. This is consistent
+    with the additional mining work in this CPU-limited local setup; it is not a
+    measurement of security against a specified real-world hash-power
+    distribution. Increasing $k$ from 0 to 4 reduced throughput from
+    $55.63\pm2.59$ to $32.39\pm2.26$ responses/s and increased p50 from 68.9
+    to 139.9\,ms. At $k=0$, a transfer is reported without waiting for a
+    successor block, so this is a performance endpoint with no confirmation-
+    depth protection.
+
+    The block-capacity sweep is not monotonic: the highest mean observed rate
+    was at capacity 10, and capacity 100 had notably larger run-to-run
+    variation. Capacity is an upper bound, not a target fill level; these data
+    do not establish that increasing the block limit causes lower throughput.
+    The seven-replica runs achieved $31.13\pm2.77$ responses/s versus
+    $39.85\pm0.43$ at four replicas, but the comparison also changes $f$, adds
+    miners, lowers the per-replica memory limit from 1 GiB to 700 MiB, and has
+    six rather than three runs at seven replicas. Treat this as a local scaling
+    observation, not an isolated estimate of communication cost. The mean p50
+    also rose from $109.9\pm2.6$\,ms at four replicas to
+    $138.9\pm12.9$\,ms at seven.
+    Across resource-instrumented Blockchain sweeps, replica CPU averaged about
+    99--101\% of the one-vCPU limit, making CPU saturation a material
+    constraint. These measurements characterize one local Docker host and are
+    not directly comparable to the course cluster.
+    The baseline Blockchain runs added 1\,ms of link delay, while BRB runs used
+    0\,ms. Their raw performance values should therefore not be ranked as if
+    network conditions matched; a final cross-protocol comparison must align
+    link delay, workload, resource limits and repetition count.
+
+    Values are means and standard deviations across repeated runs. The p50
+    and p95 columns are means of the corresponding per-run percentiles, not
+    percentiles pooled across requests. Principal settings have three runs;
+    difficulty, block capacities 10/50/100 and the seven-replica follow-up have
+    six retained runs. The run count is shown in Table~\ref{tab:blockchain-performance}.
+    Figure~\ref{fig:blockchain-load-capacity} visualizes the concurrency and
+    block-capacity trends with run-to-run variation.
+
+    \begin{table*}[t]
+        \centering
+        \scriptsize
+        \caption{Blockchain client-side performance. Values are mean $\pm$
+        sample standard deviation. Throughput counts successful client transfer
+    responses per second; p50 and p95 values are means of per-run percentiles.
+    The final column gives total failed and timed-out transfers across the runs.}
+        \label{tab:blockchain-performance}
+        \begin{tabular}{l r r r r r}
+            \toprule
+            \textbf{Sweep / setting} & \textbf{Runs} &
+            \textbf{Responses/s} & \textbf{p50 (ms)} & \textbf{p95 (ms)} &
+            \textbf{Failed / timed out} \\
+            \midrule
+            Clients: 1 & 3 & $12.67\pm0.72$ & $69.3\pm4.3$ & $160.3\pm11.4$ & 0 / 0 \\
+            Clients: 5 (4 replicas) & 3 & $39.85\pm0.43$ & $109.9\pm2.6$ & $250.4\pm13.8$ & 0 / 0 \\
+            Clients: 10 & 3 & $56.63\pm3.75$ & $141.3\pm18.9$ & $419.9\pm24.4$ & 0 / 0 \\
+            Clients: 20 & 3 & $64.69\pm4.01$ & $251.6\pm28.9$ & $650.9\pm49.6$ & 0 / 0 \\
+            Clients: 50 & 3 & $73.20\pm15.10$ & $552.5\pm102.7$ & $1603.4\pm429.3$ & 0 / 0 \\
+            $k=0$ & 3 & $55.63\pm2.59$ & $68.9\pm1.3$ & $216.0\pm32.0$ & 0 / 0 \\
+            $k=1$ & 3 & $43.89\pm1.87$ & $91.2\pm8.0$ & $248.2\pm5.9$ & 0 / 0 \\
+            $k=4$ & 3 & $32.39\pm2.26$ & $139.9\pm10.0$ & $280.7\pm28.5$ & 0 / 0 \\
+            Difficulty: 16 bits & 6 & $40.38\pm0.69$ & $105.8\pm4.9$ & $261.9\pm18.7$ & 0 / 0 \\
+            Difficulty: 18 bits & 6 & $11.47\pm1.17$ & $385.1\pm57.6$ & $952.5\pm139.9$ & 0 / 0 \\
+            Difficulty: 20 bits & 6 & $2.94\pm0.67$ & $1428.1\pm333.4$ & $3346.4\pm827.8$ & 5 / 5 \\
+            Block capacity: 1 & 3 & $27.79\pm1.90$ & $119.0\pm6.4$ & $360.3\pm40.2$ & 1 / 7 \\
+            Block capacity: 10 & 6 & $41.63\pm2.25$ & $100.9\pm7.1$ & $244.1\pm13.8$ & 0 / 0 \\
+            Block capacity: 50 & 6 & $37.29\pm2.02$ & $114.2\pm8.0$ & $291.9\pm16.3$ & 0 / 0 \\
+            Block capacity: 100 & 6 & $37.72\pm7.30$ & $116.0\pm25.5$ & $303.7\pm128.5$ & 0 / 0 \\
+            Replicas: 7 (5 clients) & 6 & $31.13\pm2.77$ & $138.9\pm12.9$ & $333.6\pm43.6$ & 0 / 0 \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
+
+    \begin{figure*}[t]
+        \centering
+        \begin{tikzpicture}
+            \begin{groupplot}[
+                group style={group size=2 by 2, horizontal sep=1.35cm,
+                    vertical sep=0.9cm},
+                width=0.44\textwidth,
+                height=4.0cm,
+                grid=major,
+                major grid style={black!15},
+                tick label style={font=\scriptsize},
+                label style={font=\footnotesize},
+                title style={font=\small},
+                every axis plot/.append style={thick, mark=*}
+            ]
+                \nextgroupplot[
+                    title={Confirmation depth},
+                    xlabel={$k$}, ylabel={Successful client responses/s},
+                    xmin=-0.2, xmax=4.2, xtick={0,1,4}, ymin=0, ymax=65
+                ]
+                \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (0,55.63) +- (0,2.59)
+                    (1,43.89) +- (0,1.87)
+                    (4,32.39) +- (0,2.26)
+                };
+
+                \nextgroupplot[
+                    title={Proof-of-work difficulty},
+                    xlabel={Difficulty (bits)}, ylabel={Successful client responses/s},
+                    xmin=15.5, xmax=20.5, xtick={16,18,20}, ymin=0, ymax=46
+                ]
+                \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (16,40.38) +- (0,0.69)
+                    (18,11.47) +- (0,1.17)
+                    (20,2.94) +- (0,0.67)
+                };
+
+                \nextgroupplot[
+                    xlabel={$k$}, ylabel={Median response latency (ms)},
+                    xmin=-0.2, xmax=4.2, xtick={0,1,4}, ymin=40, ymax=170
+                ]
+                \addplot+[teal!70!black, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (0,68.94) +- (0,1.25)
+                    (1,91.18) +- (0,8.04)
+                    (4,139.92) +- (0,10.00)
+                };
+
+                \nextgroupplot[
+                    xlabel={Difficulty (bits)}, ylabel={Median response latency (ms)},
+                    xmin=15.5, xmax=20.5, xtick={16,18,20},
+                    ymode=log, ymin=80, ymax=3000
+                ]
+                \addplot+[teal!70!black, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (16,105.80) +- (0,4.93)
+                    (18,385.14) +- (0,57.59)
+                    (20,1428.07) +- (0,333.38)
+                };
+            \end{groupplot}
+        \end{tikzpicture}
+        \caption{Blockchain performance sensitivity to confirmation depth and
+        mining difficulty. Points show means and error bars one sample
+        standard deviation; $k$ settings use three runs and difficulty settings use six.
+        The latency axis for difficulty is logarithmic.}
+        \Description{Four-panel plot showing transfer-operation throughput
+        falling and median response latency rising as confirmation depth or
+        proof-of-work difficulty increases.}
+        \label{fig:blockchain-sweeps}
+    \end{figure*}
+
+    \begin{figure*}[t]
+        \centering
+        \begin{tikzpicture}
+            \begin{groupplot}[
+                group style={group size=2 by 2, horizontal sep=1.35cm,
+                    vertical sep=1.2cm},
+                width=0.44\textwidth,
+                height=4.0cm,
+                grid=major,
+                major grid style={black!15},
+                tick label style={font=\scriptsize},
+                label style={font=\footnotesize},
+                title style={font=\small},
+                every axis plot/.append style={thick, mark=*}
+            ]
+                \nextgroupplot[
+                    title={Client concurrency},
+                    xlabel={Logical clients}, ylabel={Successful responses/s},
+                    xmode=log, log basis x=10,
+                    xmin=0.8, xmax=60, xtick={1,5,10,20,50},
+                    xticklabels={1,5,10,20,50},
+                    ymin=0, ymax=95
+                ]
+                \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (1,12.67) +- (0,0.72)
+                    (5,39.85) +- (0,0.43)
+                    (10,56.63) +- (0,3.75)
+                    (20,64.69) +- (0,4.01)
+                    (50,73.20) +- (0,15.10)
+                };
+
+                \nextgroupplot[
+                    title={Client concurrency},
+                    xlabel={Logical clients}, ylabel={Transfer latency (ms)},
+                    xmode=log, log basis x=10,
+                    xmin=0.8, xmax=60, xtick={1,5,10,20,50},
+                    xticklabels={1,5,10,20,50},
+                    ymode=log, ymin=50, ymax=2500,
+                    legend style={font=\scriptsize, at={(0.03,0.97)},
+                        anchor=north west}
+                ]
+                \addplot+[teal!70!black, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (1,69.25) +- (0,4.35)
+                    (5,109.94) +- (0,2.56)
+                    (10,141.29) +- (0,18.85)
+                    (20,251.57) +- (0,28.93)
+                    (50,552.46) +- (0,102.68)
+                };
+                \addlegendentry{p50}
+                \addplot+[orange!85!black, dashed, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (1,160.31) +- (0,11.35)
+                    (5,250.43) +- (0,13.79)
+                    (10,419.88) +- (0,24.38)
+                    (20,650.87) +- (0,49.56)
+                    (50,1603.36) +- (0,429.29)
+                };
+                \addlegendentry{p95}
+
+                \nextgroupplot[
+                    xlabel={Maximum transfers per block},
+                    ylabel={Successful responses/s},
+                    xmode=log, log basis x=10,
+                    xmin=0.8, xmax=120, xtick={1,10,50,100},
+                    xticklabels={1,10,50,100},
+                    ymin=0, ymax=50
+                ]
+                \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (1,27.79) +- (0,1.90)
+                    (10,41.63) +- (0,2.25)
+                    (50,37.29) +- (0,2.02)
+                    (100,37.72) +- (0,7.30)
+                };
+
+                \nextgroupplot[
+                    xlabel={Maximum transfers per block},
+                    ylabel={Median latency (ms)},
+                    xmode=log, log basis x=10,
+                    xmin=0.8, xmax=120, xtick={1,10,50,100},
+                    xticklabels={1,10,50,100},
+                    ymin=0, ymax=160
+                ]
+                \addplot+[teal!70!black, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (1,119.00) +- (0,6.39)
+                    (10,100.93) +- (0,7.06)
+                    (50,114.16) +- (0,7.96)
+                    (100,116.04) +- (0,25.47)
+                };
+            \end{groupplot}
+        \end{tikzpicture}
+        \caption{Blockchain client load and block-capacity sweeps. Points show
+        means and error bars one sample standard deviation. Load points use three runs;
+        block-capacity 1 uses three runs and capacities 10, 50 and 100 use six.
+        Latency axes show means of the per-run percentiles.}
+        \Description{Four plots show successful transfer responses and median
+        and p95 latency as client count increases, plus throughput and median
+        latency for block capacities 1, 10, 50 and 100.}
+        \label{fig:blockchain-load-capacity}
+    \end{figure*}
+
+    \subsubsection{Safety: S1--S6}
+    \label{subsec:eval-blockchain-safety}
+
+    Table~\ref{tab:blockchain-s-scenarios} defines the Blockchain safety
+    scenarios referenced in the results below.
+
+    \begin{table*}[t]
+        \centering
+        \small
+        \caption{Blockchain S1--S6 safety scenario definitions and checks.}
+        \label{tab:blockchain-s-scenarios}
+        \begin{tabular}{p{0.9cm}p{4.0cm}p{9.8cm}}
+            \toprule
+            \textbf{ID} & \textbf{Scenario} & \textbf{Primary check} \\
+            \midrule
+            S1 & Valid and invalid blocks/transfers & Reject invalid proof of work, parent, height, size, signature or duplicate transfer; ensure later valid input can still be accepted. \\
+            S2 & Duplicate and out-of-order delivery & Redeliver blocks and deliver a child before its parent; check idempotence and orphan attachment. \\
+            S3 & Competing forks before finality & Deliver competing valid branches in different orders; check deterministic fork choice and convergence. \\
+            S4 & Fork after payment execution & Challenge a branch containing an executed transfer; record chain choice and the no-rollback conflict. \\
+            S5 & Byzantine miner behavior & Withhold blocks, disseminate invalid blocks or selectively send competing valid blocks within the fault bound. \\
+            S6 & Shared-account conflicts & Issue concurrent transfers for the same account sequence; reconcile executed IDs, balances and replica digests. \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
+
+    \paragraph{S1--S3: Validation, delivery order and pre-finality forks.}
+    Deterministic Blockchain tests cover invalid proof of work, malformed
+    parent, incorrect height, oversized blocks, invalid transfer signatures,
+    duplicate transfer IDs, duplicate delivery and out-of-order orphan
+    attachment. Rejected input does not poison a later valid block. A separate
+    two-replica test gives the replicas the same competing valid blocks in
+    opposite orders and confirms they finalize only the deterministically
+    selected branch. These are controlled correctness tests, not randomized
+    performance trials.
+
+    \paragraph{S4: Fork after a transfer is executed.}
+    The deterministic S4 counterexample uses two protocol instances backed by
+    separate ledgers. One ledger executes Alice's sequence-0 transfer to Bob
+    after it reaches $k=1$; the other executes a conflicting sequence-0 transfer
+    to Carol on a longer branch. Once the first instance learns the longer
+    branch, its chain view changes, but its already-applied payment effect cannot
+    be undone. The conflicting transfer is rejected by that ledger, while the
+    second ledger has already applied it; their executed-ID sets and digests
+    differ even though both preserve supply. This deterministic test
+    demonstrates the no-rollback limitation; it does not estimate the
+    probability of a deep reorganization under a particular mining-power
+    distribution. In separate 30-second process-level longest-chain runs using
+    four replicas, five independent clients, difficulty 16, $k=2$, 0\,ms added
+    delay and no replica resource caps, logs recorded 2,680--2,765
+    chain-reorganization events per run, yet all correct replicas converged at
+    the final audit in all three runs. Those finite runs did not reproduce the
+    deterministic post-finality counterexample and are not evidence that it
+    cannot occur.
+
+    \paragraph{S5: Byzantine miner behavior.}
+    Process-level Blockchain Byzantine tests used four replicas with one faulty
+    replica and three repetitions per profile. These 15-second fault runs used
+    five closed-loop clients, difficulty 16, $k=2$, no added link delay, and no
+    replica CPU or memory cgroup limits. Correct replicas rejected all
+    920--1,057 injected invalid blocks in each invalid-block run. The withholding
+    profile logged 1,656--1,868 withheld blocks per run; the selectively sending
+    profile logged 886--1,012 selective-send events per run. Correct replicas
+    converged and conserved supply in all repetitions. These runs demonstrate
+    the observed outcomes for these schedules, not liveness under every
+    Byzantine strategy.
+
+    \paragraph{P6: Timed disruption and recovery.}
+    Three Blockchain crash runs stopped one replica 10 seconds after client
+    startup. The three surviving replicas converged in every run and conserved
+    supply. No transfer timed out; one balance request timed out in one
+    repetition.
+
+    We also repeated the Blockchain network-disruption experiment after
+    verifying the fault hook. In each of three 30-second runs, the harness
+    applied 100\% packet loss to node4's outbound interface from 10 to 20
+    seconds, then removed the loss rule. This is one-way egress loss, not a
+    bidirectional network partition. The runs used four replicas, one fault,
+    difficulty 16, block capacity 100, $k=2$, five closed-loop clients, 1\,ms
+    added link delay, and 1-vCPU/1-GiB replica limits. All three runs completed
+    client transfer requests without reported failures or timeouts, and every
+    audited replica conserved supply. However, only one run ended with matching
+    full ledger snapshots: after the stabilization wait, node4 matched the
+    other replicas in run 1, while in runs 2 and 3 nodes 1--3 agreed with each
+    other and node4 had a different, behind state. This shows that the
+    harness's state-stability condition can be reached while replicas still
+    disagree. The earlier unverified partition attempts are excluded.
+
+    \begin{table*}[t]
+        \centering
+        \scriptsize
+        \caption{Blockchain outcome under verified 10-second node4 egress loss.}
+        \label{tab:blockchain-egress-loss}
+        \begin{tabular}{c c r c c}
+            \toprule
+            \textbf{Workload} & \textbf{Run} & \textbf{Successful client replies} &
+            \textbf{Same final digest} & \textbf{Supply} \\
+            \midrule
+            30 s & 1 & 2169 & 4/4 & Yes \\
+            30 s & 2 & 1990 & 3/4 & Yes \\
+            30 s & 3 & 1917 & 3/4 & Yes \\
+            \midrule
+            90 s & 1 & 5653 & 4/4 & Yes \\
+            90 s & 2 & 5961 & 4/4 & Yes \\
+            90 s & 3 & 5618 & 4/4 & Yes \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
+
+    To determine whether the short-run lag persisted during continued
+    operation, we repeated the same disruption three times with a 90-second
+    client workload instead of 30 seconds. In all three longer runs, the
+    replicas had matching final snapshots after the harness stabilization
+    period, and the clients completed 5,618--5,961 transfers without failures
+    or timeouts. This is consistent with a lagging replica catching up while
+    mining and client traffic continue. Because the follow-up also extends the
+    active workload, it does not establish recovery during an idle period or
+    identify which recovery mechanism caused convergence.
+
+    \paragraph{S6: Shared-account conflicts.}
+    Blockchain shared-account stress runs used four replicas, difficulty 16,
+    $k=2$, 100\% shared transfers, 0\,ms added delay and no replica CPU or
+    memory cgroup limits. With two owners, two of three repetitions converged and one
+    produced three distinct correct-replica digests. Supply was conserved in
+    all three. With five owners, all three recorded repetitions converged and
+    conserved supply. This sample is too small to infer that five owners are
+    safer; it demonstrates that contention and run scheduling affect observed
+    outcomes. Divergent-reply counts are lower bounds because replies arriving
+    after a client accepts a quorum are not included.
+
+
+    \subsection{Consensus-free BRB evaluation}
+    \label{subsec:eval-brb}
+    \subsubsection{Performance}
+
+    The four-replica BRB client-count sweep used an
+    80\% transfer mix, no shared-account transfers, and three 30-second runs per
+    setting. Table~\ref{tab:brb-load} reports mean transfer throughput and the
+    mean of each run's median latency. Throughput did not consistently grow
+    beyond five clients: it remained around 320--360 transfers/s, while median
+    latency increased from 8.3\,ms at five clients to 85.0\,ms at fifty. At
+    fifty clients, balance reads timed out 228 times in total across the three
+    repetitions. Transfer requests had no client-reported failures or timeouts
+    in this sweep. The ten-client throughput has high run-to-run variation,
+    which is retained in the standard deviation rather than excluded.
+    Figure~\ref{fig:brb-results} shows the load and shared-account sweeps.
+
+    \begin{table*}[t]
+        \centering
+        \scriptsize
+        \caption{BRB load sweep with four replicas. Values are mean $\pm$
+        sample standard deviation across three runs. Latencies are means of the
+        per-run transfer p50 and p95 values; timeout counts are summed across
+        runs.}
+        \label{tab:brb-load}
+        \begin{tabular}{r r r r r r}
+            \toprule
+            \textbf{Clients} & \textbf{Transfers/s} & \textbf{p50 (ms)} &
+            \textbf{p95 (ms)} & \textbf{Transfer timeouts} &
+            \textbf{Balance timeouts} \\
+            \midrule
+            1  & $320.8\pm6.1$    & $2.05\pm0.09$   & $5.59\pm0.88$ & 0 & 0 \\
+            5  & $339.0\pm8.9$    & $8.26\pm0.67$   & $45.52\pm6.35$ & 0 & 2 \\
+            10 & $361.3\pm52.2$   & $16.97\pm3.01$  & $66.20\pm7.75$ & 0 & 6 \\
+            20 & $329.0\pm19.1$   & $48.47\pm10.76$ & $101.88\pm8.23$ & 0 & 40 \\
+            50 & $340.1\pm15.2$   & $85.02\pm9.29$  & $242.08\pm34.49$ & 0 & 228 \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
+
+    With five logical clients, increasing the replica count from four to seven
+    reduced completed transfer throughput from $339.0\pm8.9$ to
+    $157.8\pm12.4$ transfers/s; mean per-run median latency rose from
+    $8.3\pm0.7$ to $24.6\pm2.5$\,ms. The seven-replica runs had no transfer
+    timeouts and two balance-read timeouts in total. This local comparison includes additional
+    message fan-out and replica work, and is not a general scalability result.
+    The operation-mix sweep measured $56{,}607\pm3{,}694$ balance reads/s for
+    read-only clients. At a 50/50 mix, transfer throughput was
+    $339.6\pm10.9$/s and balance throughput was $337.5\pm14.2$/s. With only
+    transfers, throughput was $347.4\pm28.3$/s. Table~\ref{tab:brb-mix} also
+    reports per-operation p50 and p95 latency. Balance reads are answered
+    locally; their high read-only rate should not be interpreted as BRB write
+    capacity. The 50/50 runs recorded ten balance-read timeouts in total; the
+    transfer-only runs had no client-reported transfer timeouts.
+
+    \begin{table*}[t]
+        \centering
+        \scriptsize
+        \caption{BRB operation-mix sweep with four replicas and five clients.
+        Values are mean $\pm$ sample standard deviation across three runs. Throughput
+        counts successful client responses per second; latency columns are means
+        of per-run percentiles. A dash means that operation type was not issued.}
+        \label{tab:brb-mix}
+        \begin{tabular}{r r r r r r r}
+            \toprule
+            \textbf{Transfer mix} & \multicolumn{3}{c}{\textbf{Balance reads}} &
+            \multicolumn{3}{c}{\textbf{Transfers}} \\
+            \cmidrule(lr){2-4}\cmidrule(lr){5-7}
+            & \textbf{Ops/s} & \textbf{p50 (ms)} & \textbf{p95 (ms)} &
+            \textbf{Ops/s} & \textbf{p50 (ms)} & \textbf{p95 (ms)} \\
+            \midrule
+            0\% & $56607\pm3694$ & $0.082\pm0.005$ & $0.12\pm0.02$ & -- & -- & -- \\
+            50\% & $337.5\pm14.2$ & $0.52\pm0.11$ & $2.01\pm0.21$ &
+            $339.6\pm10.9$ & $6.88\pm0.71$ & $45.39\pm3.56$ \\
+            100\% & -- & -- & -- & $347.4\pm28.3$ & $9.19\pm0.28$ & $42.42\pm8.83$ \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
+
+    \begin{figure*}[t]
+        \centering
+        \begin{tikzpicture}
+            \begin{groupplot}[
+                group style={group size=2 by 2, horizontal sep=1.35cm,
+                    vertical sep=0.9cm},
+                width=0.44\textwidth,
+                height=4.0cm,
+                grid=major,
+                major grid style={black!15},
+                tick label style={font=\scriptsize},
+                label style={font=\footnotesize},
+                title style={font=\small},
+                every axis plot/.append style={thick, mark=*}
+            ]
+                \nextgroupplot[
+                    title={Load sweep},
+                    xlabel={Logical clients}, ylabel={Transfer operations/s},
+                    xmode=log, log basis x=10,
+                    xmin=0.8, xmax=60, xtick={1,5,10,20,50},
+                    xticklabels={1,5,10,20,50},
+                    ymin=0, ymax=440
+                ]
+                \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (1,320.81) +- (0,6.14)
+                    (5,339.01) +- (0,8.93)
+                    (10,361.25) +- (0,52.20)
+                    (20,328.98) +- (0,19.09)
+                    (50,340.09) +- (0,15.22)
+                };
+
+                \nextgroupplot[
+                    title={Load sweep},
+                    xlabel={Logical clients}, ylabel={Median latency (ms)},
+                    xmode=log, log basis x=10,
+                    xmin=0.8, xmax=60, xtick={1,5,10,20,50},
+                    xticklabels={1,5,10,20,50},
+                    ymin=0, ymax=110
+                ]
+                \addplot+[teal!70!black, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (1,2.05) +- (0,0.09)
+                    (5,8.26) +- (0,0.67)
+                    (10,16.97) +- (0,3.01)
+                    (20,48.47) +- (0,10.76)
+                    (50,85.02) +- (0,9.29)
+                };
+
+                \nextgroupplot[
+                    xlabel={Transfers to shared accounts (\%)},
+                    ylabel={Completed operations/s},
+                    xmin=-5, xmax=105, xtick={0,50,100}, ymin=0, ymax=430
+                ]
+                \addplot+[blue, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (0,369.22) +- (0,19.75)
+                    (50,353.81) +- (0,36.37)
+                    (100,157.80) +- (0,33.97)
+                };
+
+                \nextgroupplot[
+                    xlabel={Transfers to shared accounts (\%)},
+                    ylabel={Client-reported failed results (\%)},
+                    xmin=-5, xmax=105, xtick={0,50,100}, ymin=0, ymax=70
+                ]
+                \addplot+[orange!85!black, error bars/.cd, y dir=both, y explicit] coordinates {
+                    (0,0.00) +- (0,0.00)
+                    (50,14.14) +- (0,3.57)
+                    (100,54.29) +- (0,6.53)
+                };
+            \end{groupplot}
+        \end{tikzpicture}
+        \caption{BRB performance and shared-account outcomes. Points show the
+        mean across three runs and error bars show one sample standard deviation.
+        The load plots use a logarithmic client axis. Correct-replica state
+        divergence occurred in 0/3, 3/3, and 3/3 shared-account runs at 0\%,
+        50\%, and 100\%, respectively.}
+        \Description{Four plots show BRB transfer throughput staying roughly
+        flat as client count rises while latency increases, and shared-account
+        completed-operation throughput declining as contention grows.}
+        \label{fig:brb-results}
+    \end{figure*}
+
+    Client-reported transfer latency ends when the client receives $f+1$
+    matching replies. For Blockchain, it is not a direct measurement of block
+    propagation, mining time, or inclusion-to-execution time. We therefore
+    interpret it as end-to-end request-completion latency. Percentiles are
+    retained per run; percentiles from separate clients or runs are not averaged
+    into a global percentile.
+
+    \subsubsection{Safety: S1--S8}
+    \label{subsec:eval-brb-safety}
+
+    \begin{table}[t]
+        \centering
+        \scriptsize
+        \setlength{\tabcolsep}{3pt}
+        \caption{BRB safety scenarios and checks.}
+        \label{tab:brb-scenarios}
+        \begin{tabular}{p{0.55cm}>{\raggedright\arraybackslash}p{6.65cm}}
+            \toprule
+            \textbf{ID} & \textbf{Scenario and primary check} \\
+            \midrule
+            S1 & Delivery waits for $2f+1$ READY votes and occurs at most once. \\
+            S2 & Duplicate READY messages and READY-before-ECHO ordering do not count a sender twice and still permit relay. \\
+            S3 & Conflicting votes from one member cannot form a second quorum for the same instance. \\
+            S4 & Votes from non-members do not count toward a quorum. \\
+            S5 & One Byzantine replica selectively sends messages; check correct-replica safety and progress for this schedule. \\
+            S6 & Concurrent transfers contend for a shared account; reconcile outcomes, balances and final digests. \\
+            S7 & A replica crashes within the fault bound; surviving replicas continue and state is checked. \\
+            S8 & A replica loses network egress temporarily; check behavior during the fault and convergence after restoration. \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+
+    \paragraph{S1--S4: Deterministic protocol and replication checks.}
+
+    Deterministic tests exercise BRB delivery after the READY quorum, duplicate
+    and READY-before-ECHO messages, a single member's conflicting vote, and
+    rejection of non-member votes. Replication tests verify that invalid
+    transfers are ignored, duplicate deliveries execute once, and rejection
+    does not prevent a later valid delivery. The complete Maven test suite
+    passed.
+
+    \paragraph{S5: Selective-send Byzantine replica.}
+    Three process-level selective-send runs configured node4 as the sole
+    Byzantine replica. Its action logs confirm that it sent SEND messages to
+    only two peers and omitted its local ECHO. The correct replicas converged
+    and conserved supply in every repetition, with no transfer failures or
+    timeouts. In this client workload, each request is sent to all replicas, so
+    the other correct origins also disseminated the same transfer; this result
+    does not cover every selective Byzantine schedule.
+
+    \paragraph{S6: Shared-account conflicts.}
+    For BRB, the shared-account sweep varied the fraction of transfers directed
+    to shared accounts while holding four replicas and five concurrent clients
+    fixed. Completed-operation throughput was $369.2\pm19.8$, $353.8\pm36.4$,
+    and $157.8\pm34.0$ operations/s at 0\%, 50\% and 100\% shared use,
+    respectively. At 0\% shared use, all three runs converged. At 50\% and
+    100\%, all three runs ended with divergent correct-replica snapshots. The
+    client-reported failed-result fraction was $14.1\pm3.6\%$ and
+    $54.3\pm6.5\%$, respectively. Each run's fraction is failed transfer
+    results divided by all completed transfer results (successful plus failed);
+    timeouts are reported separately and excluded from that denominator. The
+    shared-use runs had 15 timeouts in total at 50\% and 8 at 100\% across the
+    three repetitions. Every audited replica conserved total supply, and the
+    audit records classified all shared transfer IDs as executed or conflicting.
+    A client-reported failed result does not establish that no replica executed
+    that transfer; divergent replicas can make different local decisions. These
+    observations are consistent with per-instance reliable broadcast: it
+    delivers each instance consistently, but imposes no total order across
+    different transfers. Concurrent transfers can therefore contend for the
+    same account sequence number and be accepted in different orders. Resolving
+    this requires an ordering or arbitration mechanism beyond this variant.
+
+    \paragraph{S7: Replica crash.}
+    Three BRB crash runs stopped node4 ten seconds after client startup. The
+    three remaining replicas continued to execute transfers and converged to
+    matching full snapshots in every run. Transfer operations did not fail or
+    time out; between one and three balance reads timed out per repetition.
+    \paragraph{S8: Temporary egress loss and restoration.}
+    Three further runs dropped all network egress from node4 for ten seconds and
+    then restored it. The harness recorded both fault boundaries, and all
+    replicas converged after restoration with conserved supply. No transfer
+    failed or timed out in those runs; balance reads had zero to three timeouts
+    per repetition.
+
+    \subsection{PBFT evaluation}
+    \label{subsec:eval-pbft}
+    \subsubsection{Performance}
+    \textbf{TODO: Add PBFT performance results here: load, batch size and flush
+    timeout, replica count, throughput and per-operation latency.}
+
+    \subsubsection{Safety}
+    \label{subsec:eval-pbft-safety}
+    PBFT safety tests and results should be summarized here once the PBFT
+    records are available in this report workspace.
+
+    \subsection{Cross-protocol comparison}
+    \label{subsec:eval-performance-comparison}
+    \textbf{TODO: Compare measured performance and safety outcomes for
+    Blockchain, BRB and PBFT under matched workload, client and replica
+    resources, link delay and repetition counts. Include shared-account
+    consistency, fault recovery and each protocol's finality/order guarantees;
+    explain any remaining differences in their operation semantics.}
+
+    \subsubsection{Interpretation}
+
+    Blockchain replication offers a simple longest-chain ordering rule and
+    probabilistic stability controlled by mining power and $k$. Its practical
+    costs in these experiments are mining work and confirmation delay. The
+    design does not provide deterministic finality: a deep reorganization can
+    conflict with irreversible payment execution. The BRB-based consensus-free
+    variant also has no total order across instances; our shared-account runs
+    showed conflicting sequence outcomes and divergent correct-replica ledgers
+    despite supply conservation. PBFT is intended to establish a deterministic
+    total order. The measured comparison remains to be completed after the
+    PBFT results are added. The available results are local and preliminary.
+
+    \section{Conclusion}
+    \label{sec:conclusion}
+
+    We study three designs for Byzantine fault-tolerant payment replication over
+    Babel~2: consensus-free replication using BRB, state machine replication
+    using PBFT, and a Proof-of-Work blockchain. This draft reports Blockchain
+    and BRB experiments from a local Docker environment. The measurements show
+    that proof-of-work difficulty and confirmation depth affect throughput and
+    latency. BRB achieved high local read throughput, but shared-account runs
+    exposed divergent correct-replica states because independent broadcasts
+    have no global order. Irreversible payment execution is also incompatible
+    with arbitrary deep-chain reorganization unless the system adds a finality
+    mechanism or the application supports rollback. The results are preliminary
+    and local. \textbf{TODO: Update this conclusion with the PBFT results and
+    final three-way comparison.}
+
+%%
+%% Bibliography
+    \bibliographystyle{ACM-Reference-Format}
+    \bibliography{references}
+
+\end{document}
+\endinput

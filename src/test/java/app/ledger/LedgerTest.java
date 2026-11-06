@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Set;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -225,6 +226,64 @@ class LedgerTest {
         other.execute(accounts.transfer("client2", "shared", "client3", 10, 0));
         assertEquals(ledger.balance("shared"), other.balance("shared"));
         assertNotEquals(ledger.stateDigest(), other.stateDigest());
+    }
+
+    @Test
+    void snapshotDescribesGenesisState() {
+        LedgerSnapshot snapshot = ledger.snapshot();
+
+        assertEquals(5, snapshot.accounts().size());
+        assertEquals(100, snapshot.accounts().get("client1").balance());
+        assertEquals(0, snapshot.accounts().get("client1").nextSeq());
+
+        assertTrue(snapshot.executedTransferIds().isEmpty());
+        assertTrue(snapshot.pendingTransferIds().isEmpty());
+
+        assertEquals(500, snapshot.totalSupply());
+        assertEquals(500, snapshot.sumOfBalances());
+        assertTrue(snapshot.supplyConserved());
+        assertEquals(ledger.stateDigest(), snapshot.stateDigest());
+    }
+
+    @Test
+    void snapshotIncludesExecutedAndPendingTransferIds() {
+        Transfer executed = accounts.transfer("client1", "client2", 10, 0);
+        Transfer pending = accounts.transfer("client1", "client3", 5, 2);
+
+        assertEquals(TransferStatus.EXECUTED, ledger.execute(executed).get(0).status());
+        assertEquals(TransferStatus.PENDING, ledger.execute(pending).get(0).status());
+
+        LedgerSnapshot snapshot = ledger.snapshot();
+        LedgerSnapshot.AccountState client1 = snapshot.accounts().get("client1");
+
+        assertEquals(Set.of(executed.id()), snapshot.executedTransferIds());
+        assertEquals(Set.of(pending.id()), snapshot.pendingTransferIds());
+
+        assertEquals(90, client1.balance());
+        assertEquals(1, client1.nextSeq());
+        assertEquals(List.of(executed.id()), client1.executedTransferIds());
+        assertEquals(List.of(pending.id()), client1.pendingTransferIds());
+
+        assertTrue(snapshot.supplyConserved());
+        assertEquals(ledger.stateDigest(), snapshot.stateDigest());
+    }
+
+    @Test
+    void snapshotCollectionsAreImmutable() {
+        Transfer executed = accounts.transfer("client1", "client2", 10, 0);
+        ledger.execute(executed);
+
+        LedgerSnapshot snapshot = ledger.snapshot();
+        LedgerSnapshot.AccountState client1 = snapshot.accounts().get("client1");
+
+        assertThrows(UnsupportedOperationException.class,
+                () -> snapshot.accounts().put("another", client1));
+
+        assertThrows(UnsupportedOperationException.class,
+                () -> client1.executedTransferIds().add("fake-id"));
+
+        assertThrows(UnsupportedOperationException.class,
+                () -> snapshot.executedTransferIds().add("fake-id"));
     }
 
     private void assertInvalid(Transfer t) {

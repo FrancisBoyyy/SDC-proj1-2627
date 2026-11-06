@@ -15,7 +15,10 @@ import org.apache.logging.log4j.Logger;
 import org.jspecify.annotations.Nullable;
 
 import app.ledger.Ledger;
+import app.ledger.LedgerSnapshot;
+import app.ledger.TransferAuditEvent;
 import app.ledger.TransferOutcome;
+import app.ledger.TransferOutcomeJournal;
 import app.ledger.TransferStatus;
 import app.messages.BalanceReply;
 import app.messages.BalanceRequest;
@@ -65,6 +68,8 @@ public class PaymentService implements BabelProtocol {
 
     private final Ledger ledger;
     private final long digestInterval;
+    private final @Nullable TransferOutcomeJournal auditJournal;
+    private @Nullable LedgerSnapshot lastAuditSnapshot;
 
     // Clients waiting for the outcome of transfers, indexed by account#seq
     private final Map<String, List<Waiter>> waiting;
@@ -82,8 +87,17 @@ public class PaymentService implements BabelProtocol {
     private BabelChannel channel;
 
     public PaymentService(Ledger ledger, long digestInterval) {
+        this(ledger, digestInterval, null);
+    }
+
+    public PaymentService(
+            Ledger ledger,
+            long digestInterval,
+            @Nullable TransferOutcomeJournal auditJournal
+    ) {
         this.ledger = ledger;
         this.digestInterval = digestInterval;
+        this.auditJournal = auditJournal;
         this.waiting = new HashMap<>();
         this.inFlight = new HashSet<>();
         this.executedIndex = new HashMap<>();
@@ -95,6 +109,7 @@ public class PaymentService implements BabelProtocol {
         this.channel = channel;
         LOGGER.info("Payment service ready with {} accounts (total supply {})", ledger.accounts().size(),
                 ledger.totalSupply());
+        logAuditSnapshotIfChanged();
         if (digestInterval > 0) {
             runtime.setUpTimer(new StateDigestTimer(), digestInterval, digestInterval, TimeUnit.MILLISECONDS);
         }
@@ -115,6 +130,16 @@ public class PaymentService implements BabelProtocol {
         try {
             Transfer t = request.transfer();
             TransferStatus status = ledger.statusOf(t);
+            if (auditJournal != null) {
+                logAuditEvent(auditJournal.recordClientRequest(t));
+
+                long ledgerIndex = status == TransferStatus.EXECUTED
+                        ? executedIndex.getOrDefault(t.id(), -1L)
+                        : -1;
+                logAuditEvent(auditJournal.recordRequestStatus(
+                        t, status, ledgerIndex));
+            }
+
             switch (status) {
                 case INVALID, CONFLICT -> reply(client, request.requestId(), t, status, -1);
                 case EXECUTED -> reply(client, request.requestId(), t, status, executedIndex.getOrDefault(t.id(), -1L));
@@ -122,6 +147,10 @@ public class PaymentService implements BabelProtocol {
                     waiting.computeIfAbsent(key(t), k -> new ArrayList<>())
                             .add(new Waiter(client, request.requestId(), t.id()));
                     if (status == TransferStatus.PENDING && inFlight.add(t.id())) {
+                        if (auditJournal != null) {
+                            logAuditEvent(
+                                    auditJournal.recordReplicationSubmission(t));
+                        }
                         LOGGER.debug("Submitting {} to the replication protocol", t);
                         runtime.deliverEvent(new SubmitTransaction(t));
                     }
@@ -143,6 +172,10 @@ public class PaymentService implements BabelProtocol {
             Transfer t = execute.transfer();
             inFlight.remove(t.id());
             for (TransferOutcome outcome : ledger.execute(t)) {
+                if (auditJournal != null) {
+                    logAuditEvent(auditJournal.recordLedgerOutcome(outcome));
+                }
+
                 switch (outcome.status()) {
                     case EXECUTED -> {
                         executedIndex.put(outcome.transfer().id(), outcome.ledgerIndex());
@@ -198,6 +231,23 @@ public class PaymentService implements BabelProtocol {
     public void uponStateDigestTimer(StateDigestTimer timer) {
         LOGGER.info("STATE executed={} pending={} supply_ok={} digest={}", ledger.size(),
                 ledger.pendingTransfers(), ledger.sumOfBalances() == ledger.totalSupply(), ledger.stateDigest());
+        logAuditSnapshotIfChanged();
+    }
+
+    private void logAuditSnapshotIfChanged() {
+        if (auditJournal == null) {
+            return;
+        }
+
+        LedgerSnapshot snapshot = ledger.snapshot();
+        if (!snapshot.equals(lastAuditSnapshot)) {
+            LOGGER.info("AUDIT_STATE {}", snapshot);
+            lastAuditSnapshot = snapshot;
+        }
+    }
+
+    private void logAuditEvent(TransferAuditEvent event) {
+        LOGGER.info("AUDIT {}", event);
     }
 
     /**

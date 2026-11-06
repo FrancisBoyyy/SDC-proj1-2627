@@ -3,3 +3,4 @@ logs/
 *.csv
 output.log
 dependency-reduced-pom.xml
+/benchmarks/
