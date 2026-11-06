@@ -1,5 +1,7 @@
 import java.security.cert.CertificateException;
 
+import agreement.PBFTParameters;
+import agreement.PracticalByzantineFaultTolerantProtocol;
 import app.PaymentService;
 import app.ledger.Ledger;
 import app.ledger.TransferOutcomeJournal;
@@ -26,6 +28,8 @@ import pt.unl.fct.di.novasys.babel2.core.membership.MembershipConsumerExtensionF
 import pt.unl.fct.di.novasys.babel2.core.membership.MembershipProviderBabelProtocol;
 import pt.unl.fct.di.novasys.babel2.core.membership.MembershipProviderExtensionFactory;
 import pt.unl.fct.di.novasys.babel2.utils.BabelPropertiesReader;
+import replication.SMRParameters;
+import replication.StateMachineReplication;
 import utils.BabelIPComparator;
 import utils.Crypto;
 import utils.SystemConfiguration;
@@ -99,28 +103,40 @@ void main(String[] args) throws IOException, KeyStoreException,
             Long.parseLong(properties.getProperty("digest_interval", "5000")),
             auditJournal);
 
-    // Select the replication variant explicitly. Keep blockchain as the default
-    // so existing configurations continue to run the previously integrated variant.
+    // Select the agreement and replication pair. PBFT uses the SMR layer;
+    // BRB and Blockchain keep their existing dissemination protocol.
     String replicationVariant = properties.getProperty("replication", "blockchain")
             .trim()
             .toLowerCase(java.util.Locale.ROOT);
-    BabelProtocol replicationProtocol = switch (replicationVariant) {
-        case "brb", "consensus-free" ->
-                new BroadcastReplicationProtocol(
-                        ledger::isValid,
-                        BroadcastReplicationProfile.fromProperty(
-                                properties.getProperty("brb_byzantine_profile", "none")));
+    BabelProtocol replicationProtocol;
+    BabelProtocol broadcastProtocol;
+    switch (replicationVariant) {
+        case "pbft" -> {
+            replicationProtocol = new StateMachineReplication(
+                    membership, SMRParameters.fromProperties(properties));
+            broadcastProtocol = new PracticalByzantineFaultTolerantProtocol(
+                    membership, config.getF(), PBFTParameters.fromProperties(properties));
+        }
+        case "brb", "consensus-free" -> {
+            replicationProtocol = new BroadcastReplicationProtocol(
+                    ledger::isValid,
+                    BroadcastReplicationProfile.fromProperty(
+                            properties.getProperty("brb_byzantine_profile", "none")));
+            broadcastProtocol = new ByzantineReliableBroadcastProtocol(
+                    membership, config.getF());
+        }
         case "blockchain" -> {
             var blockchainConfig = BlockchainConfig.from(properties);
             var blockchainByzantineProfile = BlockchainByzantineProfile.fromProperty(
                     properties.getProperty("blockchain_byzantine_profile", "none"));
-            yield new BlockchainReplicationProtocol(
+            replicationProtocol = new BlockchainReplicationProtocol(
                     blockchainConfig, ledger::isValid, blockchainByzantineProfile);
+            broadcastProtocol = new ByzantineReliableBroadcastProtocol(
+                    membership, config.getF());
         }
         default -> throw new IllegalArgumentException(
                 "Unknown replication variant: " + replicationVariant);
-    };
-    var broadcastProtocol = new ByzantineReliableBroadcastProtocol(membership, config.getF());
+    }
     var membershipProtocol = new StaticMembershipProtocol(membership,
             Long.parseLong(properties.getProperty("reconnect_interval", "1000")));
 
