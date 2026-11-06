@@ -740,6 +740,14 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         return Crypto.toHex(Crypto.digest((chain + "|" + batchDigest).getBytes(StandardCharsets.UTF_8)));
     }
 
+    /**
+     * Executes, in order, every decided batch that is now contiguous with what was already executed, extending the
+     * chained digest of the history for each one. Whenever the executed sequence number reaches a multiple of the
+     * checkpoint interval, it signs and registers its own checkpoint and sends it to their neighbors.
+     * Then, it ends a pending state transfer if the replica caught up by itself, garbage collect everything covered by both
+     * the stable checkpoint and the local execution, and starts a state transfer if the replica is behind the stable
+     * checkpoint.
+     */
     private void advanceCheckpoints() throws GeneralSecurityException {
         String d;
         while ((d = decidedDigests.remove(executedUpTo + 1)) != null) {
@@ -762,6 +770,12 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         startStateTransfer();
     }
 
+    /**
+     * Given the ViewChange messages of a NewView, picks the one carrying the highest stable checkpoint and, if it is
+     * newer than the local one, makes it stable using the view change proof.
+     * This enables a replica that missed checkpoint messages to align its window with the rest of the replicas
+     * when a new view is installed.
+     */
     private void adoptStableCheckpoint(Collection<ViewChangeMsg> msgs) {
         ViewChangeMsg best = null;
         for (ViewChangeMsg vc : msgs)
@@ -772,6 +786,12 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             makeStable(best.stableSeqn(), best.checkpointProof());
     }
 
+    /**
+     * Records a signed checkpoint vote from a replica (only the first one per replica and seqn is kept) and counts the
+     * votes that agree with the same digest.
+     * Once a quorum of replicas vouches for the same state at that sequence number, the checkpoint becomes stable.
+     * Votes for seqns that are already stable are ignored.
+     */
     private void registerCheckpoint(CheckpointMsg cp) {
         if (cp.seqn() <= lastStableSeqn)
             return;
@@ -786,6 +806,14 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
             makeStable(cp.seqn(), matching);
     }
 
+    /**
+     * Installs a new stable checkpoint together with the quorum of signed messages that proves it, discarding the
+     * votes for it and for older checkpoints.
+     * If this replica already executed up to that point it garbage collect the old state,
+     * otherwise it starts a state transfer to catch up.
+     * Since the stable checkpoint moves the sequence
+     * number window forward, batches that were deferred for lack of space are proposed again.
+     */
     private void makeStable(long seqn, List<CheckpointMsg> proof) {
         if (seqn <= lastStableSeqn)
             return;
@@ -807,6 +835,12 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         }
     }
 
+    /**
+     * Frees the protocol state that is no longer needed once everything up to the given sequence number is both stable
+     * and executed: the consensus instances and pending decided digests up to it can be dropped.
+     * The log of decided batches is kept for a configurable number of extra sequence numbers such that
+     * lagging replicas can still fetch them.
+     */
     private void garbageCollect(long seqn) {
         if (seqn <= lastCollected)
             return;
@@ -829,6 +863,13 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         registerCheckpoint(msg);
     }
 
+    /**
+     * Serves a state transfer request from a lagging replica by replying with the decided batches of the requested
+     * range of sequence numbers. The request is ignored if:
+     * - it comes from an uknown replica or from itself
+     * - the range is malformed or larger than the configured cap - to bound a single request can cause
+     * - any batch of the range is no longer in the local log
+     */
     @UponMessageIn
     public void uponFetchMsg(FetchMsg msg, BabelNode sender) {
         if (!membership.contains(sender) || sender.equals(runtime.getMyself())
@@ -853,11 +894,21 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         channel.send(sender, new BatchesMsg(msg.fromSeqn(), batches));
     }
 
+    /**
+     * Handles the reply to a fetch request.
+     * The batches are accepted only if:
+     * - a transfer is in progress and they cover exactly the missing range up to the target stable checkpoint.
+     * They are trusted only if chaining their digests into the local history digest yields the digest vouched
+     * for by the stable checkpoint proof, so a faulty peer cannot feed wrong data. Other peers are tried on mismatch.
+     * On success the batches are delivered, the executed position
+     * and history digest are updated, the transfer ends, and checkpoint processing resumes.
+     */
     @UponMessageIn
     public void uponBatchesMsg(BatchesMsg msg, BabelNode sender) throws GeneralSecurityException {
         if (transferTarget == 0 || !membership.contains(sender) || msg.batches().isEmpty()
                 || msg.fromSeqn() != executedUpTo + 1
-                || msg.fromSeqn() + msg.batches().size() - 1 != transferTarget) return;
+                || msg.fromSeqn() + msg.batches().size() - 1 != transferTarget)
+            return;
 
         String chain = historyDigest;
         for (List<BabelMessage> batch : msg.batches())
@@ -883,20 +934,33 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         advanceCheckpoints();
     }
 
+    /**
+     * Starts (or retargets) a state transfer when the replica is behind the latest stable checkpoint.
+     * The target sequence number, digest to verify and the replicas to ask (signers of the checkpoint) are taken
+     * from the stable proof.
+     * A first transfer waits a grace period in case the replica catches up through the normal
+     * protocol, while a retarget fetches immediately, since peers could already discarded the old target.
+     */
     private void startStateTransfer() {
         if (executedUpTo >= lastStableSeqn || transferTarget == lastStableSeqn) return;
         boolean retarget = transferTarget != 0;
-        // a newer stable checkpoint means peers may have garbage-collected what we were fetching: always chase the latest
-        LOGGER.info("Behind stable checkpoint {} (executed up to {}): {} state transfer", lastStableSeqn, executedUpTo,
+        LOGGER.info("Behind stable checkpoint {} (executed up to {}): {} a state transfer", lastStableSeqn, executedUpTo,
                 retarget ? "retargeting" : "starting");
         transferTarget = lastStableSeqn;
-        transferDigest = stableProof.get(0).digest();
+        transferDigest = stableProof.getFirst().digest();
         transferPeers = stableProof.stream().map(CheckpointMsg::sender).toList();
         transferAttempt = 0;
-        if (retarget) requestFetch();               // the old target is likely unservable, do not wait
-        else armFetchTimer(params.fetchGraceTime()); // fetch only if we have not caught up by then
+        if (retarget)
+            requestFetch(); // because the old target is likely unservable, so do not wait
+        else
+            armFetchTimer(params.fetchGraceTime());
     }
 
+    /**
+     * Asks one of the replicas that signed the stable checkpoint (never itself) for the batches between the next
+     * unexecuted seqn and the transfer target. Peers are tried in round-robin order across attempts, and a retry timer is
+     * armed so that an unresponsive or faulty peer does not block the transfer.
+     */
     private void requestFetch() {
         BabelNode peer;
         do {
@@ -909,21 +973,39 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         armFetchTimer(params.fetchRetryTime());
     }
 
+    /**
+     * (Re)arms the fetch timer for the current transfer target, cancelling any previous one so that only a single
+     * timer is pending at a time.
+     */
     private void armFetchTimer(long delayMs) {
-        if (fetchTimer != null) fetchTimer.cancel(false);
+        if (fetchTimer != null)
+            fetchTimer.cancel(false);
+
         fetchTimer = runtime.setUpTimer(new FetchTimer(transferTarget), delayMs, TimeUnit.MILLISECONDS);
     }
 
+    /**
+     * Ends the current state transfer, either because it completed or because the replica caught up on its own, by
+     * clearing the target and cancelling the pending fetch timer.
+     */
     private void stopTransfer() {
         transferTarget = 0;
-        if (fetchTimer != null) { fetchTimer.cancel(false); fetchTimer = null; }
+        if (fetchTimer != null) {
+            fetchTimer.cancel(false);
+            fetchTimer = null;
+        }
     }
 
-    // TIMERS
-
+    /**
+     * Handler of the timer that fires when a fetch request went unanswered (or after the initial grace period).
+     * Timers that belong to a transfer that already finished or was retargeted are stale and ignored; otherwise the fetch is
+     * sent again, to the next peer.
+     */
     @UponBabelEvent
     public void uponFetchTimer(FetchTimer t) {
-        if (transferTarget == 0 || t.transferTarget() != transferTarget) return;   // stale
+        if (transferTarget == 0 || t.transferTarget() != transferTarget)
+            return; // stale timer
+
         fetchTimer = null;
         requestFetch();
     }
