@@ -829,13 +829,15 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         registerCheckpoint(msg);
     }
 
-
-
     @UponMessageIn
     public void uponFetchMsg(FetchMsg msg, BabelNode sender) {
         if (!membership.contains(sender) || sender.equals(runtime.getMyself())
                 || msg.fromSeqn() < 1 || msg.toSeqn() < msg.fromSeqn()
-                || msg.toSeqn() - msg.fromSeqn() >= params.fetchRangeCap()) return;
+                || msg.toSeqn() - msg.fromSeqn() >= params.fetchRangeCap()) {
+            LOGGER.warn("Ignoring fetch [{}, {}] from replica {}: invalid or over range cap {}",
+                    msg.fromSeqn(), msg.toSeqn(), membership.indexOf(sender), params.fetchRangeCap());
+            return;
+        }
 
         var batches = new ArrayList<List<BabelMessage>>();
         for (long s = msg.fromSeqn(); s <= msg.toSeqn(); s++) {
@@ -882,13 +884,17 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     }
 
     private void startStateTransfer() {
-        if (transferTarget != 0 || executedUpTo >= lastStableSeqn) return;
-        LOGGER.info("Behind stable checkpoint {} (executed up to {}): starting state transfer", lastStableSeqn, executedUpTo);
+        if (executedUpTo >= lastStableSeqn || transferTarget == lastStableSeqn) return;
+        boolean retarget = transferTarget != 0;
+        // a newer stable checkpoint means peers may have garbage-collected what we were fetching: always chase the latest
+        LOGGER.info("Behind stable checkpoint {} (executed up to {}): {} state transfer", lastStableSeqn, executedUpTo,
+                retarget ? "retargeting" : "starting");
         transferTarget = lastStableSeqn;
         transferDigest = stableProof.get(0).digest();
         transferPeers = stableProof.stream().map(CheckpointMsg::sender).toList();
         transferAttempt = 0;
-        armFetchTimer(params.fetchGraceTime());   // fetch only if we have not caught up by then
+        if (retarget) requestFetch();               // the old target is likely unservable, do not wait
+        else armFetchTimer(params.fetchGraceTime()); // fetch only if we have not caught up by then
     }
 
     private void requestFetch() {
