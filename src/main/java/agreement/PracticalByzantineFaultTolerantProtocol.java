@@ -62,12 +62,14 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     // CHECKPOINT STATE TRANSFER
     private @Nullable ScheduledFuture<?> fetchTimer;
     private long lastCollected;
-    private final TreeMap<Long, List<BabelMessage>> decidedLog;  // retained for serving fetches
+    private final TreeMap<Long, DecisionProof> decidedProofLog; // retained batches and commit certificates
     private final Deque<List<BabelMessage>> deferredBatches; // primary: waiting for window space
     private long transferTarget; // where 0 means no transfer in progress
     private String transferDigest;
     private List<BabelNode> transferPeers;  // the signers of the stable proof
     private int transferAttempt;
+    private int catchUpAttempt;
+    private long tailFetchBackoffMs;
 
     /**
      * Relevant objects to communicate with the Babel 2 framework.
@@ -125,12 +127,14 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
 
         // CHECKPOINT STATE TRANSFER
         this.lastCollected = 0;
-        this.decidedLog = new TreeMap<>();
+        this.decidedProofLog = new TreeMap<>();
         this.deferredBatches = new ArrayDeque<>();
         this.transferTarget = 0;
         this.transferDigest = null;
         this.transferPeers = null;  // the signers of the stable proof
         this.transferAttempt = 0;
+        this.catchUpAttempt = 0;
+        this.tailFetchBackoffMs = params.fetchRetryTime();
     }
 
     @Override
@@ -462,7 +466,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         Decided decided = new Decided(seqn, state.getBatch());
         LOGGER.debug("Commits quorum reached -> Decide {} sent to SMR", decided);
         runtime.deliverEvent(decided);
-        decidedLog.put(seqn, state.getBatch());
+        decidedProofLog.put(seqn, state.decisionProof(seqn));
         advanceCheckpoints();
     }
 
@@ -672,6 +676,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         sendToOthers(vc);
 
         tryNewView(newView);
+        requestTailFetch();
     }
 
     @UponMessageIn
@@ -915,7 +920,7 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
         lastCollected = seqn;
         instances.keySet().removeIf(id -> id.seqn() <= seqn);
         decidedDigests.keySet().removeIf(s -> s <= seqn);
-        decidedLog.headMap(seqn - params.retain(), true).clear();
+        decidedProofLog.headMap(seqn - params.retain(), true).clear();
     }
 
     @UponMessageIn
@@ -940,65 +945,128 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     @UponMessageIn
     public void uponFetchMsg(FetchMsg msg, BabelNode sender) {
         if (!membership.contains(sender) || sender.equals(runtime.getMyself())
-                || msg.fromSeqn() < 1 || msg.toSeqn() < msg.fromSeqn()
-                || msg.toSeqn() - msg.fromSeqn() >= params.fetchRangeCap()) {
+                || msg.fromSeqn() < 1 || (msg.toSeqn() != 0 && msg.toSeqn() < msg.fromSeqn())
+                || (msg.toSeqn() != 0 && msg.toSeqn() - msg.fromSeqn() >= params.fetchRangeCap())) {
             LOGGER.warn("Ignoring fetch [{}, {}] from replica {}: invalid or over range cap {}",
                     msg.fromSeqn(), msg.toSeqn(), membership.indexOf(sender), params.fetchRangeCap());
             return;
         }
 
-        var batches = new ArrayList<List<BabelMessage>>();
-        for (long s = msg.fromSeqn(); s <= msg.toSeqn(); s++) {
-            List<BabelMessage> batch = decidedLog.get(s);
-            if (batch == null) {
+        long latestSeqn = executedUpTo;
+        long targetSeqn = msg.toSeqn() == 0
+                ? Math.min(latestSeqn, msg.fromSeqn() + params.fetchRangeCap() - 1L)
+                : msg.toSeqn();
+        if (targetSeqn > latestSeqn) {
+            LOGGER.warn("Cannot serve fetch [{}, {}] to replica {}: only executed through {}",
+                    msg.fromSeqn(), targetSeqn, membership.indexOf(sender), latestSeqn);
+            return;
+        }
+
+        var decisions = new ArrayList<DecisionProof>();
+        for (long s = msg.fromSeqn(); s <= targetSeqn; s++) {
+            DecisionProof proof = decidedProofLog.get(s);
+            if (proof == null) {
                 LOGGER.warn("Cannot serve fetch [{}, {}] from replica {}: seqn {} is not in my log",
-                        msg.fromSeqn(), msg.toSeqn(), membership.indexOf(sender), s);
+                        msg.fromSeqn(), targetSeqn, membership.indexOf(sender), s);
                 return;
             }
-            batches.add(batch);
+            decisions.add(proof);
         }
-        LOGGER.info("Serving fetch [{}, {}] to replica {}", msg.fromSeqn(), msg.toSeqn(), membership.indexOf(sender));
-        channel.send(sender, new BatchesMsg(msg.fromSeqn(), batches));
+        if (!decisions.isEmpty())
+            LOGGER.info("Serving fetch [{}, {}] to replica {}", msg.fromSeqn(), targetSeqn, membership.indexOf(sender));
+        channel.send(sender, new BatchesMsg(msg.fromSeqn(), latestSeqn, decisions));
     }
 
     /**
-     * Handles the reply to a fetch request.
-     * The batches are accepted only if:
-     * - a transfer is in progress and they cover exactly the missing range up to the target stable checkpoint.
-     * They are trusted only if chaining their digests into the local history digest yields the digest vouched
-     * for by the stable checkpoint proof, so a faulty peer cannot feed wrong data. Other peers are tried on mismatch.
-     * On success the batches are delivered, the executed position
-     * and history digest are updated, the transfer ends, and checkpoint processing resumes.
+     * Handles stable-checkpoint transfer and tail catch-up replies. Every batch must carry a valid primary
+     * signature and a quorum of distinct signed commits. Stable-checkpoint transfers additionally match the
+     * checkpoint digest; tail catch-up relies on the decision certificates.
      */
     @UponMessageIn
     public void uponBatchesMsg(BatchesMsg msg, BabelNode sender) throws GeneralSecurityException {
-        if (transferTarget == 0 || !membership.contains(sender) || msg.batches().isEmpty()
-                || msg.fromSeqn() != executedUpTo + 1
-                || msg.fromSeqn() + msg.batches().size() - 1 != transferTarget)
+        if (!membership.contains(sender) || msg.fromSeqn() != executedUpTo + 1)
             return;
 
+        boolean checkpointTransfer = transferTarget != 0;
+        long checkpointTarget = checkpointTransfer ? transferTarget : 0;
+        if (checkpointTransfer) {
+            if (!transferPeers.contains(sender) || msg.decisions().isEmpty()
+                    || msg.decisions().size() > params.fetchRangeCap()
+                    || msg.fromSeqn() + msg.decisions().size() - 1 != checkpointTarget
+                    || msg.latestSeqn() < checkpointTarget)
+                return;
+        } else if (!inViewChange || fetchTimer == null || msg.decisions().size() > params.fetchRangeCap()) {
+            return;
+        }
+
+        long executedBeforeFetch = executedUpTo;
         String chain = historyDigest;
-        for (List<BabelMessage> batch : msg.batches())
-            chain = chainStep(chain, PBFTState.batchDigest(batch));
-        if (!chain.equals(transferDigest)) {
+        long expectedSeqn = msg.fromSeqn();
+        for (DecisionProof proof : msg.decisions()) {
+            if (proof.seqn() != expectedSeqn++ || !validateDecisionProof(proof))
+                return;
+            String digest = PBFTState.batchDigest(proof.batch());
+            String existing = decidedDigests.get(proof.seqn());
+            if (existing != null && !existing.equals(digest))
+                return;
+            chain = chainStep(chain, digest);
+        }
+        if (checkpointTransfer && !chain.equals(transferDigest)) {
             LOGGER.warn("Fetched batches from replica {} do not match the stable digest, trying another peer",
                     membership.indexOf(sender));
             requestFetch();
             return;
         }
 
-        long seqn = msg.fromSeqn();
-        for (List<BabelMessage> batch : msg.batches()) {
-            runtime.deliverEvent(new Decided(seqn, batch)); // SMR ignores what it already has
-            decidedLog.put(seqn++, batch);
+        for (DecisionProof proof : msg.decisions()) {
+            long seqn = proof.seqn();
+            String digest = PBFTState.batchDigest(proof.batch());
+            if (seqn > executedUpTo && decidedDigests.putIfAbsent(seqn, digest) == null) {
+                runtime.deliverEvent(new Decided(seqn, proof.batch())); // SMR ignores what it already has
+                decidedProofLog.put(seqn, proof);
+            }
         }
-        long reached = transferTarget;
-        executedUpTo = reached;
-        historyDigest = chain;
-        stopTransfer();
-        LOGGER.info("State transfer complete: executed up to {}, chain digest {}", reached, chain);
-
         advanceCheckpoints();
+        if (executedUpTo > executedBeforeFetch)
+            tailFetchBackoffMs = params.fetchRetryTime();
+
+        if (checkpointTransfer && executedUpTo >= checkpointTarget) {
+            long reached = checkpointTarget;
+            if (transferTarget == checkpointTarget)
+                stopTransfer();
+            LOGGER.info("State transfer complete: executed up to {}, chain digest {}", reached, historyDigest);
+            startStateTransfer();
+        }
+
+        if (inViewChange && transferTarget == 0) {
+            if (msg.decisions().size() == params.fetchRangeCap() && executedUpTo < msg.latestSeqn())
+                requestTailFetch();
+            else {
+                armFetchTimer(-1, tailFetchBackoffMs);
+                tailFetchBackoffMs = Math.min(tailFetchBackoffMs * 2, 10_000);
+            }
+        }
+    }
+
+    private boolean validateDecisionProof(DecisionProof proof) {
+        PrePrepareMessage prePrepare = proof.prePrepare();
+        BabelNode primary = expectedPrimary(prePrepare.view());
+        if (proof.seqn() != prePrepare.seqn()
+                || !PBFTState.batchDigest(proof.batch()).equals(prePrepare.hash())
+                || !Crypto.verify(prePrepareBytes(prePrepare.view(), prePrepare.seqn(), prePrepare.hash()),
+                prePrepare.sig(), ((PublicKeyBabelNode) primary).identity()))
+            return false;
+
+        Set<BabelNode> signers = new HashSet<>();
+        for (ProofEntry commit : proof.commits()) {
+            if (!isMember(commit.sender()) || commit.view() != prePrepare.view()
+                    || commit.seqn() != proof.seqn() || !commit.digest().equals(prePrepare.hash())
+                    || !signers.add(commit.sender())
+                    || !Crypto.verify(commitBytes(commit.view(), commit.seqn(), commit.digest()),
+                    commit.signature(), ((PublicKeyBabelNode) commit.sender()).identity()))
+                return false;
+        }
+        return signers.size() >= commitQuorum;
     }
 
     /**
@@ -1041,14 +1109,35 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
     }
 
     /**
+     * Retrieves decided entries beyond the latest stable checkpoint. This is useful when a replica remains in
+     * view change while the other correct replicas keep making progress in the old view.
+     */
+    private void requestTailFetch() {
+        if (!inViewChange || transferTarget != 0) return;
+
+        BabelNode peer;
+        do {
+            peer = membership.get(catchUpAttempt++ % membership.size());
+        } while (peer.equals(runtime.getMyself()));
+
+        LOGGER.info("Fetching decided tail from seqn {} from replica {}", executedUpTo + 1, membership.indexOf(peer));
+        channel.send(peer, new FetchMsg(executedUpTo + 1, 0));
+        armFetchTimer(-1, params.fetchRetryTime());
+    }
+
+    /**
      * (Re)arms the fetch timer for the current transfer target, cancelling any previous one so that only a single
      * timer is pending at a time.
      */
     private void armFetchTimer(long delayMs) {
+        armFetchTimer(transferTarget, delayMs);
+    }
+
+    private void armFetchTimer(long target, long delayMs) {
         if (fetchTimer != null)
             fetchTimer.cancel(false);
 
-        fetchTimer = runtime.setUpTimer(new FetchTimer(transferTarget), delayMs, TimeUnit.MILLISECONDS);
+        fetchTimer = runtime.setUpTimer(new FetchTimer(target), delayMs, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -1070,6 +1159,14 @@ public class PracticalByzantineFaultTolerantProtocol implements BabelProtocol {
      */
     @UponBabelEvent
     public void uponFetchTimer(FetchTimer t) {
+        if (t.transferTarget() == -1) {
+            if (inViewChange && transferTarget == 0 && fetchTimer != null) {
+                fetchTimer = null;
+                requestTailFetch();
+            }
+            return;
+        }
+
         if (transferTarget == 0 || t.transferTarget() != transferTarget)
             return; // stale timer
 

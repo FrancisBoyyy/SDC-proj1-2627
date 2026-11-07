@@ -13,4 +13,8 @@ public record ProofEntry(long view, long seqn, String digest, BabelNode sender, 
     public ProofEntry(PrepareMessage msg, BabelNode from) {
         this(msg.view(), msg.seqn(), msg.hash(), from, msg.sig());
     }
+
+    public ProofEntry(CommitMessage msg, BabelNode from) {
+        this(msg.view(), msg.seqn(), msg.hash(), from, msg.sig());
+    }
 }

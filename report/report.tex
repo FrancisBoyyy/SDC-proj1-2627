@@ -95,10 +95,10 @@
         ledgers because broadcasts have no global order. PBFT provides ordered
         execution in the four-replica runs, including recovery from a one-shot
         equivocation and a primary crash. After increasing retained history,
-        all four-replica client-load runs converged. In all three targeted
-        seven-replica equivocation runs, one correct replica remained behind
-        after a 30-second cooldown, while its executed transfer IDs remained a
-        subset of the majority history.
+        all four-replica client-load runs converged. The initial targeted
+        seven-replica equivocation runs exposed a lagging correct replica; after
+        adding quorum-certified tail catch-up, all correct replicas converged in
+        four repeated runs.
         Blockchain safety experiments also show that irreversible payment
         execution can conflict with a deep reorganization. These results
         characterize the implementations and setup; they are not security
@@ -1260,36 +1260,41 @@
     The main configuration was four replicas ($n=4$, $f=1$), batch size 10,
     50\,ms batch timeout, 5\,s primary suspicion timeout, checkpoint interval
     100, no injected network delay, and no per-container CPU or memory limit.
-    The corrected P1 client-load sweep used three independent 20\,s runs per
-    load, with 3\,s preparation and 10\,s cooldown. Repeated P2--P6 runs used
-    10,000 retained sequence numbers and a 10,000-entry fetch cap; earlier
-    one-run pilots with the original 1,000-entry defaults are excluded from the
-    aggregates below. Performance latency is measured at the client until it
-    receives matching replies; these are local single-host measurements.
+    After adding quorum-certified tail catch-up, we reran the full P1--P6
+    performance matrix. It contains 61 runs: three repetitions per setting,
+    except for four repetitions of the P5 egress interruption. The runs used
+    10,000 retained sequence numbers and a 10,000-entry fetch cap. P1 used a
+    20\,s measurement interval, 3\,s preparation and 10\,s cooldown; P2--P4
+    and P6 used a 15\,s interval, 3\,s preparation and 5\,s cooldown; P5 used
+    a 20\,s interval. Earlier pre-fix performance results are excluded from
+    the tables and figures below. Performance latency is measured at the client
+    until it receives matching replies; these are local single-host
+    measurements. Docker container resource sampling ran once per second
+    during all new runs.
 
     \subsubsection{Performance: P1--P6}
 
     Table~\ref{tab:pbft-p-scenarios} identifies the PBFT performance scenarios
-    and summarizes the repeated evidence. P1 is reported in more detail in
-    Table~\ref{tab:pbft-p1-load}; its full load sweep used the corrected
-    state-transfer target and a history window large enough for the observed
-    lag. P2--P6 below include three runs per setting with the corrected
-    retention and fetch-cap values.
+    and summarizes the repeated evidence. Table~\ref{tab:pbft-p1-load} and
+    Figure~\ref{fig:pbft-p1-load} show the P1 load sweep. The performance
+    measurements include the signed decision-proof retention introduced for
+    catch-up; the separate memory comparison below measures that change
+    against the pre-fix implementation.
 
     \begin{table*}[t]
         \centering
         \small
-        \caption{PBFT P1--P6 scenarios and the available local results.}
+        \caption{PBFT P1--P6 scenarios and post-fix local results.}
         \label{tab:pbft-p-scenarios}
         \begin{tabular}{p{0.8cm}p{3.3cm}p{8.4cm}p{3.1cm}}
             \toprule
             \textbf{ID} & \textbf{Scenario} & \textbf{Variation and primary measurements} & \textbf{Evidence} \\
             \midrule
             P1 & Client load & 1, 5, 10, 20 and 50 logical clients; transfer throughput and client latency. & Three runs per load; all final replicas converged after the state-transfer fix. \\
-            P2 & Replica-count scaling & Four replicas ($f=1$) versus seven ($f=2$), with ten clients. & Three seven-replica runs; all replicas converged in each run. \\
+            P2 & Replica-count scaling & Seven replicas ($f=2$), with ten clients. & Three runs; all replicas converged in each run. Compared with the four-replica P1 ten-client point. \\
             P3 & Shared-account contention & 0\%, 10\%, 50\% and 100\% shared transfers with four concurrent clients. & Three runs per setting; all final replica digests matched. Shared-transfer rejects rose with contention. \\
             P4 & Read-heavy mix & 20\% transfers, 40\% history and 40\% balance requests; ten clients. & Three runs; all converged. Reads had higher throughput and lower latency than transfers. \\
-            P5 & Fault recovery & Primary crash within $f$; a separate timed primary-egress loss and restoration. & Three runs for each fault; survivors converged after the crash and all replicas converged after restoration. \\
+            P5 & Fault recovery & Four-replica primary egress loss for 5\,s, then restoration. & Four runs; all replicas converged after restoration. Primary crashes are covered by the safety experiment. \\
             P6 & Batching & Batch capacity 1, 10, 50 and 100; timeout 10, 50, 200 and 1000\,ms. & Three runs per setting with corrected history limits; every run converged. \\
             \bottomrule
         \end{tabular}
@@ -1298,17 +1303,17 @@
     \begin{table}[t]
         \centering
         \small
-        \caption{PBFT P1 transfer results after the state-transfer correction. Throughput and each run's p95 latency are summarized as mean $\pm$ standard deviation across three runs.}
+        \caption{PBFT P1 transfer results after the tail catch-up fix. Throughput and p95 latency are mean $\pm$ standard deviation across three runs.}
         \label{tab:pbft-p1-load}
         \begin{tabular}{r r r r r}
             \toprule
             \textbf{Clients} & \textbf{Runs} & \textbf{Transfers/s} & \textbf{p95 (ms)} & \textbf{Converged} \\
             \midrule
-            1  & 3 & $15.58 \pm 0.06$ & $69.97 \pm 0.25$ & 3/3 \\
-            5  & 3 & $534.31 \pm 9.12$ & $12.94 \pm 0.33$ & 3/3 \\
-            10 & 3 & $590.50 \pm 48.75$ & $26.45 \pm 5.68$ & 3/3 \\
-            20 & 3 & $586.45 \pm 10.30$ & $55.47 \pm 0.94$ & 3/3 \\
-            50 & 3 & $665.84 \pm 151.86$ & $113.45 \pm 41.06$ & 3/3 \\
+            1  & 3 & $15.63 \pm 0.06$ & $70.64 \pm 0.43$ & 3/3 \\
+            5  & 3 & $498.54 \pm 13.13$ & $14.57 \pm 0.45$ & 3/3 \\
+            10 & 3 & $558.40 \pm 12.30$ & $32.12 \pm 3.23$ & 3/3 \\
+            20 & 3 & $584.75 \pm 40.18$ & $56.82 \pm 3.31$ & 3/3 \\
+            50 & 3 & $576.08 \pm 47.82$ & $130.47 \pm 33.10$ & 3/3 \\
             \bottomrule
         \end{tabular}
     \end{table}
@@ -1342,11 +1347,11 @@
                     y dir=both,
                     y explicit
                 ] coordinates {
-                    (1,15.58) +- (0,0.06)
-                    (5,534.31) +- (0,9.12)
-                    (10,590.50) +- (0,48.75)
-                    (20,586.45) +- (0,10.30)
-                    (50,665.84) +- (0,151.86)
+                    (1,15.63) +- (0,0.06)
+                    (5,498.54) +- (0,13.13)
+                    (10,558.40) +- (0,12.30)
+                    (20,584.75) +- (0,40.18)
+                    (50,576.08) +- (0,47.82)
                 };
                 \nextgroupplot[
                     title={Transfer p95 latency},
@@ -1360,11 +1365,11 @@
                     y dir=both,
                     y explicit
                 ] coordinates {
-                    (1,69.97) +- (0,0.25)
-                    (5,12.94) +- (0,0.33)
-                    (10,26.45) +- (0,5.68)
-                    (20,55.47) +- (0,0.94)
-                    (50,113.45) +- (0,41.06)
+                    (1,70.64) +- (0,0.43)
+                    (5,14.57) +- (0,0.45)
+                    (10,32.12) +- (0,3.23)
+                    (20,56.82) +- (0,3.31)
+                    (50,130.47) +- (0,33.10)
                 };
             \end{groupplot}
         \end{tikzpicture}
@@ -1377,53 +1382,89 @@
         \label{fig:pbft-p1-load}
     \end{figure*}
 
-    With one client, the closed-loop transfer rate was only about 16/s, while
-    five concurrent clients raised it to about 534/s. Throughput then remained
-    in the approximate 585--666/s range as load increased, while p95 transfer
-    latency rose from 12.94\,ms at five clients to 113.45\,ms at fifty. The
-    large run-to-run variation at fifty clients and the plateau in throughput
-    suggest saturation on this shared host; they do not establish a stable
-    maximum capacity. All 15 corrected P1 runs ended with matching replica
-    digests and conserved supply. Transfer requests had no timeouts in these
-    runs. Client-observed divergent replies before quorum acceptance increased
-    at high concurrency, but were not present in final replica snapshots.
+    With one client, the closed-loop transfer rate was about 16/s; five
+    concurrent clients raised it to about 499/s. Throughput then stayed near
+    558--585/s at 10--50 clients, while p95 transfer latency rose from
+    14.57\,ms at five clients to 130.47\,ms at fifty. This throughput plateau
+    and rising tail latency are consistent with saturation on the shared host,
+    but do not establish a stable maximum capacity. All 15 P1 runs ended with
+    matching replica digests and conserved supply. Transfers had no timeouts;
+    21 balance reads timed out in total, all at 20 or 50 clients. Client-side
+    reply timeouts therefore remain a high-load observation even though the
+    replicas converged after the workload.
 
-    P2's seven-replica runs processed $223.47 \pm 2.99$ transfer replies/s
-    at p95 $79.25 \pm 3.17$\,ms. The four-replica P1 ten-client point reached
-    $590.50 \pm 48.75$/s at p95 $26.45 \pm 5.68$\,ms. The seven-replica
-    results show lower throughput and higher latency on this host; because the
-    run durations differ, treat this as an indicative scaling result rather
-    than a strictly matched estimate. All seven replicas converged in all
+    P2's seven-replica runs processed $201.21 \pm 12.35$ transfer replies/s
+    at p95 $91.67 \pm 5.19$\,ms. The four-replica P1 ten-client point reached
+    $558.40 \pm 12.30$/s at p95 $32.12 \pm 3.23$\,ms. This indicates lower
+    throughput and higher latency with seven replicas on this host, although
+    the run durations differ, so the result is indicative rather than a
+    strictly matched scaling estimate. All seven replicas converged in all
     three P2 runs.
 
     In P3, all four shared-account settings ended with matching replica
     digests and conserved supply in all repetitions. The mean number of
-    successful and rejected shared transfers per run was 688 and 59 at 10\%,
-    2,423 and 1,065 at 50\%, and 3,439 and 3,442 at 100\%. At zero shared use
+    successful and rejected shared transfers per run was 614 and 53 at 10\%,
+    2,257 and 1,022 at 50\%, and 3,237 and 3,242 at 100\%. At zero shared use
     there were no shared-transfer attempts. These rejects are application
     conflicts caused by concurrent use of the same account sequence numbers,
     not replica divergence. The measured result separates deterministic
     ordering from transaction validity: PBFT gives replicas a common order,
     while the ledger rejects transfers that lose the account-sequence race.
 
-    P4's read-heavy mix averaged $507.10 \pm 21.85$ transfer replies/s at p95
-    $19.14 \pm 0.66$\,ms, $1,013.00 \pm 70.77$ history replies/s at p95
-    $5.25 \pm 0.58$\,ms, and $1,010.47 \pm 57.09$ balance replies/s at p95
-    $5.22 \pm 0.55$\,ms across three runs. Every run converged. These operation rates
+    P4's read-heavy mix averaged $461.19 \pm 1.23$ transfer replies/s at p95
+    $20.84 \pm 0.88$\,ms, $920.62 \pm 4.72$ history replies/s at p95
+    $5.71 \pm 0.26$\,ms, and $916.36 \pm 8.09$ balance replies/s at p95
+    $5.71 \pm 0.18$\,ms across three runs. Every run converged. These operation rates
     are consistent with the workload's 20/40/40 mix and should be interpreted
     separately by operation type.
 
     For P6, batch capacities 1, 10, 50 and 100 reached respectively
-    $238.03 \pm 32.85$, $547.88 \pm 13.63$, $140.55 \pm 0.14$ and
-    $140.66 \pm 0.00$ transfer replies/s. Their p95 latencies were
-    $66.47 \pm 7.02$, $32.20 \pm 3.62$, $74.81 \pm 0.41$ and
-    $74.71 \pm 0.56$\,ms. Capacity 10 performed best in this workload;
-    capacities 50 and 100 were rarely filled before the 50\,ms timer flushed
-    them. With batch size 10, the 10, 50, 200 and 1000\,ms timeout settings
-    produced 500.94, 485.65, 504.85 and 500.01 transfers/s on average, with
-    p95 latency between 14.81 and 15.76\,ms. The differences are small relative
-    to run variation and show no consistent benefit from increasing the
-    timeout across this range.
+    $248.04 \pm 8.36$, $500.49 \pm 27.91$, $137.72 \pm 2.43$ and
+    $139.04 \pm 0.80$ transfer replies/s. Their p95 latencies were
+    $63.01 \pm 1.67$, $32.48 \pm 3.71$, $77.94 \pm 3.22$ and
+    $76.61 \pm 1.83$\,ms. Capacity 10 performed best in this workload.
+    Capacities 50 and 100 had lower observed throughput and higher latency;
+    the harness did not record batch occupancy, so we cannot attribute this
+    difference to under-filled batches alone. With batch size 10, timeout
+    settings of 10, 50, 200 and 1000\,ms produced $490.19 \pm 40.60$,
+    $511.52 \pm 23.75$, $496.48 \pm 11.01$ and $495.94 \pm 14.69$
+    transfer replies/s, with p95 latency between 31.27 and 37.95\,ms. The
+    differences show no monotonic benefit from increasing the timeout.
+
+    In P5, the primary's egress was dropped for 5\,s and then restored in four
+    runs. The transfer rate averaged $407.45 \pm 15.11$/s at p95
+    $17.22 \pm 1.12$\,ms during the 20\,s workload. The harness recorded both
+    fault boundaries in all runs; all four replicas converged with conserved
+    supply after restoration. This is evidence for recovery from the tested
+    temporary isolation, not a guarantee for arbitrary network partitions.
+
+    \begin{table*}[t]
+        \centering
+        \small
+        \caption{Sampled per-replica peak Docker memory before and after the PBFT tail catch-up fix. Each value is mean $\pm$ standard deviation across three runs; $\Delta$ is computed from paired repetitions.}
+        \label{tab:pbft-memory-overhead}
+        \begin{tabular}{p{3.7cm}r r r}
+            \toprule
+            \textbf{Workload} & \textbf{Pre-fix (MiB)} & \textbf{Post-fix (MiB)} & \textbf{Paired $\Delta$ (MiB)} \\
+            \midrule
+            P1: 50 clients, $n=4$ & $314.88 \pm 8.98$ & $321.32 \pm 33.42$ & $+6.44 \pm 41.91$ \\
+            P2: 10 clients, $n=7$ & $301.26 \pm 13.56$ & $304.53 \pm 3.86$ & $+3.27 \pm 10.33$ \\
+            P6: batch size 1, $n=4$ & $290.10 \pm 5.23$ & $301.66 \pm 0.55$ & $+11.56 \pm 5.28$ \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
+
+    We measured memory against the pre-fix source at revision \texttt{c9dfa2e}
+    using Docker's once-per-second container statistics,
+    taking each replica container's largest sampled usage within a run and
+    averaging those per-container peaks. These numbers include JVM heap,
+    native memory and container overhead; they are not heap measurements. The
+    three paired workloads show small positive mean changes, from about 3 to
+    12\,MiB per replica. The paired run spread is larger than the mean change
+    for P1 and P2; P6 shows a more consistent increase, but three runs are
+    insufficient to claim a precise general memory cost. This comparison
+    measures the additional retention of signed decision proofs against the
+    pre-fix implementation under these workloads and durations.
 
     \subsubsection{Safety and recovery}
     \label{subsec:eval-pbft-safety}
@@ -1444,7 +1485,7 @@
             \textbf{Scenario} & \textbf{Configuration and repetitions} & \textbf{Observed result} \\
             \midrule
             Primary equivocation & $n=4$, $f=1$; three runs. & Correct replicas changed view and converged in all runs. No conflicting final decision or ledger state was observed; transfers resumed after the no-op decision at the equivocated sequence. \\
-            Primary equivocation & $n=7$, $f=2$; three targeted runs, one Byzantine primary; 30\,s cooldown. & All supply checks passed. In all three runs, five correct replicas matched while the correct replica receiving the minority pre-prepare remained behind by 20, 91 and 34 transfers, respectively. Its executed transfer IDs were a strict subset of the majority set; no conflicting execution was found. \\
+            Primary equivocation & $n=7$, $f=2$; four post-fix targeted runs, one Byzantine primary; 30\,s cooldown. & All six correct replicas converged to identical audited ledger digests in all four runs; supply was conserved. The initial implementation had left one correct replica behind in three runs. The fix fetches the uncheckpointed tail with a quorum of signed commit proofs. \\
             Primary crash & $n=4$, $f=1$; three runs, primary stopped after 5\,s. & All three surviving replicas converged; no transfer timeouts were recorded. \\
             Primary egress loss & $n=4$, $f=1$; three 5\,s isolation and restoration runs. & All replicas converged after connectivity returned; audited snapshots matched and supply was conserved in all runs. \\
             Shared-account contention & $n=4$, $f=1$; three audited 100\% shared runs. & All four replicas matched their final snapshots in each run and conserved supply; same-account sequence conflicts were reported by the application. \\
@@ -1455,17 +1496,20 @@
     The equivocation results support a limited safety conclusion: under the
     tested signed equivocation schedule, we observed no two correct replicas
     deciding different values for the attacked sequence. The four-replica runs
-    recovered through view change. At seven replicas, the minority recipient
-    remained behind by 20, 91 and 34 transfers in all three audited runs, even
-    after a 30\,s cooldown. In each run its executed transfer-ID set was a
-    strict subset of the five matching correct replicas, so the evidence shows
-    lag rather than a conflicting executed transfer. This is a reproducible
-    recovery limitation for this selective-equivocation schedule: the minority
-    replica does not rejoin the current view while the other replicas continue
-    making progress, and no later stable checkpoint is produced after workload
-    quiescence. These runs do not test forged certificates, arbitrary Byzantine
-    schedules, or all invalid-batch cases. The high-load P1 results
-    also depended on state-transfer retention: before the fix, a lagging replica
+    recovered through view change. The initial seven-replica runs exposed a
+    recovery gap: a replica in view change could catch up to a stable checkpoint
+    but remained behind on later committed entries while the other replicas
+    continued making progress. We fixed this by retaining signed decision
+    certificates and fetching the uncheckpointed tail; the receiver verifies
+    the primary signature and a quorum of distinct commit signatures before
+    executing fetched entries. In four post-fix seven-replica reruns, all six
+    correct replicas converged to identical audited ledger digests within the
+    30\,s cooldown, with supply conserved. This validates recovery for the
+    tested profile and schedule, not arbitrary Byzantine behavior or forged
+    certificates. The P1--P6 performance matrix has now been rerun after this
+    recovery change, with a sampled-memory comparison in
+    Table~\ref{tab:pbft-memory-overhead}. The high-load P1 results also
+    depended on state-transfer retention: before that separate fix, a lagging replica
     requested batches already pruned from peers' logs and remained behind.
     Holding the transfer target fixed and increasing the retained history and
     fetch cap to 10,000 eliminated unservable or over-cap fetches in the 15
@@ -1491,10 +1535,10 @@
     variant also has no total order across instances; our shared-account runs
     showed conflicting sequence outcomes and divergent correct-replica ledgers
     despite supply conservation. PBFT is intended to establish a deterministic
-    total order, and our local PBFT runs converged under the tested four-replica
-    equivocation and primary-crash schedules. The seven-replica equivocation
-    schedule exposed a correct replica that did not catch up by the deadline,
-    while high-load runs required a larger retained-history window for recovery.
+    total order, and our local PBFT runs converged under the tested four- and
+    seven-replica equivocation schedules and primary-crash schedule after
+    quorum-certified tail catch-up was added. High-load runs also required a
+    larger retained-history window for recovery.
     These protocol-specific runs do not form a matched three-way comparison:
     workloads, container limits, durations and settings differ. All measurements
     are local and preliminary.
@@ -1515,7 +1559,8 @@
     mechanism or the application supports rollback. The results are preliminary
     and local. PBFT throughput rose with client concurrency before flattening
     near the tested host's capacity; equivocation and crash experiments exposed
-    recovery behavior and a seven-replica liveness limitation. The PBFT results
+    recovery behavior, and the seven-replica catch-up gap was fixed and rerun
+    successfully in four trials. The PBFT results
     use different resource limits and parameter settings from the other
     alternatives, so matched comparisons remain future work.
 

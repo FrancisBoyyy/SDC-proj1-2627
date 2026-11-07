@@ -137,4 +137,14 @@ public class PBFTState {
 
         return count;
     }
+
+    public DecisionProof decisionProof(long seqn) {
+        PrePrepareMessage prePrepare = new PrePrepareMessage(
+                batch, signedPrePrepare.view(), signedPrePrepare.seqn(), digest, signedPrePrepare.signature());
+        List<ProofEntry> commitProofs = commits.entrySet().stream()
+                .filter(entry -> entry.getValue().hash().equals(digest))
+                .map(entry -> new ProofEntry(entry.getValue(), entry.getKey()))
+                .toList();
+        return new DecisionProof(seqn, batch, prePrepare, commitProofs);
+    }
 }
