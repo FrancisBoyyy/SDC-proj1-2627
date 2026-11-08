@@ -1328,8 +1328,6 @@
                 grid=major,
                 xlabel={Logical clients},
                 xtick={1,5,10,20,50},
-                xmode=log,
-                log basis x=10,
                 xmin=1, xmax=50,
                 tick label style={font=\small},
                 label style={font=\small},
@@ -1374,8 +1372,7 @@
             \end{groupplot}
         \end{tikzpicture}
         \caption{PBFT P1 client-load results. Markers show the mean across three
-        runs and error bars show one standard deviation. The horizontal axis is
-        logarithmic to separate the five tested client counts.}
+        runs and error bars show one standard deviation.}
         \Description{Two plots show PBFT transfer throughput and p95 latency at
         one, five, ten, twenty and fifty clients, with standard-deviation error
         bars across three runs.}
@@ -1519,11 +1516,42 @@
 
     \subsection{Cross-protocol comparison}
     \label{subsec:eval-performance-comparison}
-    \textbf{TODO: Compare measured performance and safety outcomes for
-    Blockchain, BRB and PBFT under matched workload, client and replica
-    resources, link delay and repetition counts. Include shared-account
-    consistency, fault recovery and each protocol's finality/order guarantees;
-    explain any remaining differences in their operation semantics.}
+
+    \subsubsection{Latency overhead}
+    In terms of latency, BRB is the best-performing protocol on overall tested configurations.
+     Although it comes with a trade-off - the lack of consistency - in the sense that when accounts are shared,
+     concurrent transfers with the same account sequence number cause correct replicas to accept operations
+     in conflicting orders, leading to divergent ledger states. PBFT, by contrast, incurs more latency
+     overhead because it guarantees a total order of operations, ensuring ledger convergence.
+     The Blockchain primitive showed significantly higher latency across all configurations
+     because of its proof-of-work computation. For instance, in a 20-client configuration,
+     Blockchain presented 5 times more latency overhead than the BRB solution, considering
+     p50.
+
+     \subsubsection{Throughput} PBFT achieved the highest overall transfer throughput.
+     This is because of its batching technique: it gathers a set of operations before proposing them as a
+     single operation to the membership, enabling much more effective total ordering. BRB, on the other hand,
+     processes every transfer independently, with per-instance state management and per-sender vote tracking for
+     every transaction, creating heavy per-operation messaging overhead that limits scaling. Blockchain is indeed the
+     slowest protocol because replicas spend nearly one hundred per cent of their 1-vCPU time computing SHA-256 nonces,
+     severely throttling transaction inclusion.
+
+    \subsubsection{Shared-accounts consistency} This is where our protocols differ most. Because they have different philosophies,
+    even when they agree on specifications, they can deviate from the desired behavior. The BRB variant has a ledger divergence
+    because it cannot fully order operations, allowing concurrent broadcasts by two different clients of the same account to be
+    accepted at different instances on distinct replicas. The Blockchain Proof-of-Work Blockchain uses a probabilistic approach,
+    introducing a parameter k that determines when to confirm an operation. Still, this parameter is only a stability heuristic
+    and provides no formal guarantees of total transaction ordering, so it can still suffer from concurrent shared-account transfer
+    ledger divergence. PBFT is strongest in that respect, since it establishes a total order of operations across all replicas by
+    gathering quorums of messages that confirm replicas are ready to decide and have seen the operation in question. In that sense,
+    all replicas' ledgers converge, all agreeing on a concrete serialization of concurrent shared-account transactions.
+
+    \subsubsection{Safety} Under the targeted Byzantine profiles aligned with the most critical attack vectors for each
+    protocol, none deviated from the specification! Blockchain showed that correct replicas converged to matching
+    chain digests and conserved total supply across all repetitions, even with invalid block dissemination, block
+    withholding, and selective dissemination. PBFT succeeded in tolerating equivocation attacks, and BRB tolerated
+    a selective-sending replica. The only inevitable downside is the need for at least three times as many replicas
+    as faulty replicas \cite{byzantine_quorums}; otherwise, safety is compromised and all guarantees discarded.
 
     \subsubsection{Interpretation}
 
