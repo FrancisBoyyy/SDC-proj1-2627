@@ -83,7 +83,7 @@
         different guarantees: consensus-free payments over Byzantine Reliable
         Broadcast, which imposes no total order on transfers; state machine
         replication over PBFT, which yields a consistent total order; and a
-        Proof-of-Work blockchain, where blocks of transfers establish a
+        proof-of-work blockchain, where blocks of transfers establish a
         tamper-evident and eventually consistent order. We argue the correctness of
         each solution in a partially synchronous system with $n \ge 3f+1$ replicas
         and aim to compare them in terms of throughput, latency and consistency when
@@ -94,16 +94,13 @@
         but shared-account contention can leave correct replicas with divergent
         ledgers because broadcasts have no global order. PBFT provides ordered
         execution in the four-replica runs, including recovery from a one-shot
-        equivocation and a primary crash. After increasing retained history,
-        all four-replica client-load runs converged. The initial targeted
-        seven-replica equivocation runs exposed a lagging correct replica; after
-        adding quorum-certified tail catch-up, all correct replicas converged in
-        four repeated runs.
+        equivocation and a primary crash. With increasing retained history,
+        all runs converged.
         Blockchain safety experiments also show that irreversible payment
         execution can conflict with a deep reorganization. These results
-        characterize the implementations and setup; they are not security
-        guarantees for arbitrary schedules or mining-power distributions.
-        PBFT results and the limits of the current comparison are discussed below.
+        characterize the implementations and setup, and support security and correcness
+        claims but they are not absolute security guarantees.
+        We discuss results and the limits of the protocols in detail.
     \end{abstract}
 
     \maketitle
@@ -152,10 +149,11 @@
     All of them are implemented in Java using Babel~2, the evolution of the Babel
     framework \cite{babel_framework}.
 
-    The evaluation compares all three alternatives under the same application.
-    This draft now includes local measurements for Blockchain, BRB and PBFT. The
-    workload and protocol parameters are not identical in every scenario, so the
-    final matched three-way comparison remains open.
+    The evaluation reports protocol-specific local measurements for all three
+    alternatives and a focused matched comparison under common workload and
+    replica-resource settings. The matched runs cover selected performance
+    loads and a two-owner shared-account scenario; they are not exhaustive
+    parameter sweeps or an overall ranking of the protocols.
 
     The remainder of the paper is organized as follows. Section~\ref{sec:background}
     introduces the payment service and the building blocks we rely on;
@@ -257,7 +255,7 @@
     systems, and liveness requires partial synchrony. In this project the
     membership is static, so a view change only replaces the primary.
 
-    \paragraph{Proof-of-Work blockchains.} In Bitcoin-style systems
+    \paragraph{Proof-of-work blockchains.} In Bitcoin-style systems
     \cite{bitcoin}, transfers are grouped into blocks; each block references the
     hash of the previous block, forming a chain, and includes a proof-of-work (a
     nonce such that the hash of the block has a given number of leading zeros).
@@ -321,7 +319,7 @@
             Invalid blocks, withholding and chain rewrites
             & Blockchain validation rejects malformed blocks and transfers. Longest-chain selection and $k$ confirmations do not prevent every deep reorganization; executed payments are irreversible. \\
             \addlinespace
-            Nonmembers, crashes or link loss
+            Non-members, crashes or link loss
             & Handlers check authenticated membership. Liveness depends on eventual synchrony and enough responsive replicas; finite disruption runs test selected schedules only. \\
             \bottomrule
         \end{tabular}
@@ -376,7 +374,7 @@
                 \end{scope}}
             \replicastack{0cm}{Simple Replication\\Protocol}{Byzantine Reliable\\Broadcast}{(a) Consensus-free payments}
             \replicastack{5.6cm}{State Machine\\Replication}{PBFT}{(b) State machine replication\\using PBFT}
-            \replicastack{11.2cm}{Blockchain Protocol}{Byzantine Reliable\\Broadcast}{(c) Blockchain\\(Proof-of-Work)}
+            \replicastack{11.2cm}{Blockchain Protocol}{Byzantine Reliable\\Broadcast}{(c) Blockchain\\(proof-of-work)}
         \end{tikzpicture}
         \caption{Architecture of a replica and its three variants. Between the
         payment service and the replication protocol, the red upward arrow is the
@@ -445,8 +443,7 @@
     MAC/authenticator optimizations of the original paper are not used.
 
     Batch size, flush timeout, view-change timers and checkpoint garbage
-    collection are implementation parameters that must be reported alongside
-    the PBFT measurements.
+    collection are implementation specific parameters.
 
     \subsection{Blockchain}
 
@@ -457,7 +454,7 @@
     Each replica validates the blocks it receives, manages its local view of the
     chain, and adopts the longest valid chain. Once a block is $k$ blocks deep
     ($k$ is a parameter), its transfers are considered stable and are handed to the
-    application, which never rolls a transfer back; hence a transfer is executed
+    application, which never rolls a transfer back, therefore, a transfer is executed
     only after $k$ blocks were appended after the block that includes it.
 
     A block contains a parent hash, height, an ordered list of signed transfers
@@ -519,9 +516,7 @@
     prepared values through view changes, so a faulty primary cannot make
     correct replicas decide conflicting values for one sequence number. Under
     partial synchrony, a view change away from an unresponsive primary is the
-    mechanism for restoring progress. These arguments describe the intended
-    PBFT design; implementation-specific validation and experimental evidence
-    must be checked against the completed protocol.
+    mechanism for restoring progress.
 
     \subsection{Blockchain-based Payments}
 
@@ -553,14 +548,13 @@
     replica Blockchain follow-up used 700 MiB per replica. PBFT containers had
     no explicit CPU or memory limits, so they shared the Docker VM's available
     resources. Client containers had
-    no explicit resource limit. Runs used four replicas ($n=4$, $f=1$), except
+    no explicit resource limit. Table~\ref{tab:params} defines the baseline and parameter sweeps
+    for clients. Runs used four replicas ($n=4$, $f=1$), except
     the replica-count sweeps, which also used seven ($n=7$, $f=2$). The $f$
     value is the tolerated fault bound; performance runs injected no faults
     unless a fault scenario is named. The retained run manifests record client
     arguments, protocol parameters, network delay,
-    fault events and container resource limits. Scripts, environment details
-    and raw results are retained locally under the Git-ignored
-    \texttt{benchmarks/} directory.
+    fault events and container resource limits.
 
     The supplied client generates closed-loop workloads: each logical client
     executes one operation at a time. Runs have preparation, measurement and
@@ -573,7 +567,7 @@
     throughput. Runs were collected sequentially by scenario rather than in a
     randomized order, and all clients and replicas shared one Docker host;
     host load and time-dependent effects therefore remain possible confounders.
-    With three runs at most principal settings, means and standard deviations
+    With only three runs at most principal settings, means and standard deviations
     are descriptive summaries, not statistical significance tests.
 
     \begin{table}[t]
@@ -664,11 +658,7 @@
     Across resource-instrumented Blockchain sweeps, replica CPU averaged about
     99--101\% of the one-vCPU limit, making CPU saturation a material
     constraint. These measurements characterize one local Docker host and are
-    not directly comparable to the course cluster.
-    The baseline Blockchain runs added 1\,ms of link delay, while BRB runs used
-    0\,ms. Their raw performance values should therefore not be ranked as if
-    network conditions matched; a final cross-protocol comparison must align
-    link delay, workload, resource limits and repetition count.
+    not directly comparable to the (at the time unavailable) course cluster.
 
     Values are means and standard deviations across repeated runs. The p50
     and p95 columns are means of the corresponding per-run percentiles, not
@@ -965,7 +955,7 @@
     other replicas in run 1, while in runs 2 and 3 nodes 1--3 agreed with each
     other and node4 had a different, behind state. This shows that the
     harness's state-stability condition can be reached while replicas still
-    disagree. The earlier unverified partition attempts are excluded.
+    disagree.
 
     \begin{table*}[t]
         \centering
@@ -1261,7 +1251,7 @@
     50\,ms batch timeout, 5\,s primary suspicion timeout, checkpoint interval
     100, no injected network delay, and no per-container CPU or memory limit.
     After adding quorum-certified tail catch-up, we reran the full P1--P6
-    performance matrix. It contains 61 runs: three repetitions per setting,
+    performance matrix contains 61 runs: three repetitions per setting,
     except for four repetitions of the P5 egress interruption. The runs used
     10,000 retained sequence numbers and a 10,000-entry fetch cap. P1 used a
     20\,s measurement interval, 3\,s preparation and 10\,s cooldown; P2--P4
@@ -1516,81 +1506,118 @@
 
     \subsection{Cross-protocol comparison}
     \label{subsec:eval-performance-comparison}
+    \paragraph{Matched setup.}
+    We ran three repetitions per setting with four replicas ($n=4$, $f=1$),
+    1 CPU and 1\,GiB per replica, 1\,ms added one-way message delay, and the
+    same 30\,s closed-loop measurement interval, 3\,s preparation, 5\,s
+    cooldown and 10\,s operation timeout. The performance workload used five
+    or twenty clients, 80\% transfers, 20\% balance reads, no history requests
+    and no shared-account transfers. Protocol runs were rotated across the
+    repetitions. Blockchain used difficulty 16, block capacity 100 and $k=2$;
+    PBFT used batches of 10, a 50\,ms batch timeout and a 5\,s suspicion
+    timeout; BRB used its standard configuration. Auditing was disabled for
+    these performance runs. The client containers were not resource-limited.
 
-    \subsubsection{Latency overhead}
-    In terms of latency, BRB is the best-performing protocol on overall tested configurations.
-     Although it comes with a trade-off - the lack of consistency - in the sense that when accounts are shared,
-     concurrent transfers with the same account sequence number cause correct replicas to accept operations
-     in conflicting orders, leading to divergent ledger states. PBFT, by contrast, incurs more latency
-     overhead because it guarantees a total order of operations, ensuring ledger convergence.
-     The Blockchain primitive showed significantly higher latency across all configurations
-     because of its proof-of-work computation. For instance, in a 20-client configuration,
-     Blockchain presented 5 times more latency overhead than the BRB solution, considering
-     p50.
+    \begin{table*}[t]
+        \centering
+        \scriptsize
+        \caption{Matched cross-protocol performance. Each cell shows mean successful client transfer responses per second and mean per-run p50 and p95 latency, each with sample standard deviation across three runs.}
+        \label{tab:cross-protocol-performance}
+        \begin{tabular}{p{1.8cm}p{4.9cm}p{4.9cm}p{4.9cm}}
+            \toprule
+            \textbf{Clients} & \textbf{BRB} & \textbf{Blockchain} & \textbf{PBFT} \\
+            \midrule
+            5 & \shortstack{$303.0\pm30.1$ responses/s\\$p_{50}=9.76\pm0.70$\,ms; $p_{95}=46.81\pm6.54$\,ms} & \shortstack{$77.3\pm4.6$ responses/s\\$p_{50}=58.12\pm4.61$\,ms; $p_{95}=120.52\pm7.49$\,ms} & \shortstack{$344.2\pm14.6$ responses/s\\$p_{50}=11.98\pm0.20$\,ms; $p_{95}=19.99\pm2.63$\,ms} \\
+            20 & \shortstack{$317.6\pm62.3$ responses/s\\$p_{50}=48.73\pm10.97$\,ms; $p_{95}=114.30\pm32.93$\,ms} & \shortstack{$126.5\pm5.8$ responses/s\\$p_{50}=139.98\pm4.46$\,ms; $p_{95}=291.26\pm25.94$\,ms} & \shortstack{$325.6\pm81.3$ responses/s\\$p_{50}=50.86\pm15.45$\,ms; $p_{95}=115.42\pm30.66$\,ms} \\
+            \bottomrule
+        \end{tabular}
+    \end{table*}
 
-     \subsubsection{Throughput} PBFT achieved the highest overall transfer throughput.
-     This is because of its batching technique: it gathers a set of operations before proposing them as a
-     single operation to the membership, enabling much more effective total ordering. BRB, on the other hand,
-     processes every transfer independently, with per-instance state management and per-sender vote tracking for
-     every transaction, creating heavy per-operation messaging overhead that limits scaling. Blockchain is indeed the
-     slowest protocol because replicas spend nearly one hundred per cent of their 1-vCPU time computing SHA-256 nonces,
-     severely throttling transaction inclusion.
+    At five clients, PBFT had the largest mean response rate, while BRB had a
+    slightly lower median latency; PBFT had the lower p95. At twenty clients,
+    the BRB and PBFT means were close relative to their run-to-run variation,
+    and their p50 and p95 values were similar. These three-run summaries do
+    not establish a statistically significant winner. Blockchain had lower
+    response throughput and higher latency at these two settings. The matched
+    PBFT throughput is below its earlier unconstrained P1 result, illustrating
+    why the common replica CPU limit matters. No transfer failures or timeouts
+    occurred in these runs. There were 19 balance-read timeouts at twenty
+    clients (16 for BRB and 3 for PBFT). All 18 performance runs ended with
+    matching replica digests and conserved supply.
 
-    \subsubsection{Shared-accounts consistency} This is where our protocols differ most. Because they have different philosophies,
-    even when they agree on specifications, they can deviate from the desired behavior. The BRB variant has a ledger divergence
-    because it cannot fully order operations, allowing concurrent broadcasts by two different clients of the same account to be
-    accepted at different instances on distinct replicas. The Blockchain Proof-of-Work Blockchain uses a probabilistic approach,
-    introducing a parameter k that determines when to confirm an operation. Still, this parameter is only a stability heuristic
-    and provides no formal guarantees of total transaction ordering, so it can still suffer from concurrent shared-account transfer
-    ledger divergence. PBFT is strongest in that respect, since it establishes a total order of operations across all replicas by
-    gathering quorums of messages that confirm replicas are ready to decide and have seen the operation in question. In that sense,
-    all replicas' ledgers converge, all agreeing on a concrete serialization of concurrent shared-account transactions.
+    The latency endpoint is the client's receipt of $f+1$ matching replies.
+    This gives a common measurement boundary, but not equal finality semantics:
+    BRB replies follow per-instance delivery, PBFT replies follow an ordered
+    decision, and Blockchain execution waits for its configured confirmation
+    rule. The response rate measures successful client transfer responses, not
+    a protocol-independent measure of finalized ledger operations.
 
-    \subsubsection{Safety} Under the targeted Byzantine profiles aligned with the most critical attack vectors for each
-    protocol, none deviated from the specification! Blockchain showed that correct replicas converged to matching
-    chain digests and conserved total supply across all repetitions, even with invalid block dissemination, block
-    withholding, and selective dissemination. PBFT succeeded in tolerating equivocation attacks, and BRB tolerated
-    a selective-sending replica. The only inevitable downside is the need for at least three times as many replicas
-    as faulty replicas \cite{byzantine_quorums}; otherwise, safety is compromised and all guarantees discarded.
+    \paragraph{Matched shared-account scenario.}
+    We also ran three audited 30\,s repetitions with two owners (one client
+    process for each of \texttt{client1} and \texttt{client2}), 100\% of
+    transfers directed to their shared account, and the same replica, network
+    and workload resource settings. All three protocols conserved total
+    supply. BRB ended with four distinct replica digests and different executed
+    transfer-ID sets in all three runs. Blockchain and PBFT had identical
+    digests and shared-account executed-ID sets in all three runs. The
+    successful run-specific outcomes are summarized below; the failed counts
+    are client-reported conflicting transfers, not protocol crashes.
 
-    \subsubsection{Interpretation}
+    \begin{table}[t]
+        \centering
+        \scriptsize
+        \setlength{\tabcolsep}{3pt}
+        \caption{Audited two-owner shared-account comparison.}
+        \label{tab:cross-protocol-shared}
+        \begin{tabular}{p{1.35cm}p{1.35cm}p{1.2cm}p{2.7cm}}
+            \toprule
+            \textbf{Protocol} & \shortstack{\textbf{Matching}\\\textbf{digests}} & \shortstack{\textbf{Supply}\\\textbf{conserved}} & \shortstack{\textbf{Rejected replies}\\\textbf{per run (mean $\pm$ SD)}} \\
+            \midrule
+            BRB & 0/3 & 3/3 & $2635\pm126$ \\
+            Blockchain & 3/3 & 3/3 & $550\pm119$ \\
+            PBFT & 3/3 & 3/3 & $425\pm3$ \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
 
-    Blockchain replication offers a simple longest-chain ordering rule and
-    probabilistic stability controlled by mining power and $k$. Its practical
-    costs in these experiments are mining work and confirmation delay. The
-    design does not provide deterministic finality: a deep reorganization can
-    conflict with irreversible payment execution. The BRB-based consensus-free
-    variant also has no total order across instances; our shared-account runs
-    showed conflicting sequence outcomes and divergent correct-replica ledgers
-    despite supply conservation. PBFT is intended to establish a deterministic
-    total order, and our local PBFT runs converged under the tested four- and
-    seven-replica equivocation schedules and primary-crash schedule after
-    quorum-certified tail catch-up was added. High-load runs also required a
-    larger retained-history window for recovery.
-    These protocol-specific runs do not form a matched three-way comparison:
-    workloads, container limits, durations and settings differ. All measurements
-    are local and preliminary.
+    Blockchain's convergence in this matched sample is not a deterministic
+    finality guarantee: the separate two-owner Blockchain safety sweep had
+    one divergent run out of three under different settings, and its short
+    egress-loss runs also exposed temporary replica divergence. PBFT's matching
+    ledgers are consistent with its total-order design for the tested runs;
+    BRB reliably delivers each broadcast instance but does not order separate
+    conflicting transfers. The runs support these scenario-specific
+    observations, not a claim that any one protocol is safe under every
+    Byzantine schedule.
+
+    \paragraph{Guarantees and limits.}
+    BRB and PBFT use a Byzantine replica fault bound, with the tested quorum
+    design requiring $n\geq3f+1$; PBFT liveness additionally relies on partial
+    synchrony. The blockchain's probabilistic stability depends on assumptions
+    about relative mining power and network propagation, rather than the same
+    replica-count bound. The targeted fault tests elsewhere in this section
+    cover only the listed profiles. These local comparisons characterize this
+    implementation and workload; they are not formal proofs or exhaustive
+    attacks.
 
     \section{Conclusion}
     \label{sec:conclusion}
 
-    We study three designs for Byzantine fault-tolerant payment replication over
-    Babel~2: consensus-free replication using BRB, state machine replication
-    using PBFT, and a Proof-of-Work blockchain. This draft reports local Docker
-    experiments for all three alternatives, while leaving the matched
-    three-way comparison open. The measurements show
-    that proof-of-work difficulty and confirmation depth affect throughput and
-    latency. BRB achieved high local read throughput, but shared-account runs
-    exposed divergent correct-replica states because independent broadcasts
-    have no global order. Irreversible payment execution is also incompatible
-    with arbitrary deep-chain reorganization unless the system adds a finality
-    mechanism or the application supports rollback. The results are preliminary
-    and local. PBFT throughput rose with client concurrency before flattening
-    near the tested host's capacity; equivocation and crash experiments exposed
-    recovery behavior, and the seven-replica catch-up gap was fixed and rerun
-    successfully in four trials. The PBFT results
-    use different resource limits and parameter settings from the other
-    alternatives, so matched comparisons remain future work.
+    We evaluated consensus-free replication using BRB, state machine replication
+    using PBFT, and a Proof-of-Work blockchain over Babel~2. Protocol-specific
+    sweeps show the expected design tradeoffs, while the focused matched runs
+    provide a more controlled but still limited comparison. Under common
+    four-replica, 1-CPU/1-GiB settings, PBFT had the highest mean transfer
+    response rate at five clients; at twenty clients, its rate was close to
+    BRB within the observed run variation. The two-owner shared-account test
+    produced divergent BRB ledgers in all three runs, while Blockchain and
+    PBFT converged in that sample. Separate Blockchain runs nevertheless
+    observed divergence under some fork and disruption schedules, consistent
+    with probabilistic rather than deterministic finality. PBFT's targeted
+    equivocation and recovery runs converged after the quorum-certified tail
+    catch-up fix. All findings are local and schedule-specific; the matched
+    comparison does not cover every workload, resource setting or Byzantine
+    strategy.
 
 %%
 %% Bibliography
