@@ -1,15 +1,15 @@
-# SDC 2026/27 - Project 1: Replicated Payment Service (base code)
+# SDC 2026/27 - Project 1: Replicated Payment Service
 
-This is the base code for the first project of Reliable Distributed Systems
-(Sistemas Distribuídos Confiáveis). Read the project statement first.
+This is the implementation for Project 1 of Reliable Distributed Systems
+(Sistemas Distribuídos Confiáveis); the project statement remains the authority
+for the requirements.
 
-It contains a complete (and correct) application layer, a client (load
-generator and interactive console), and the infrastructure to run the system.
-The replication layer is a **placeholder that is evidently incorrect**:
-replacing it is your job.
+This repository contains three selectable replication variants: Byzantine
+Reliable Broadcast (BRB), PBFT state machine replication, and a proof-of-work
+blockchain. The payment service and client are shared by all variants.
 
-Version 1.1 (11 October 2026). See [Changes](#changes) at the end of this file
-for what changed since version 1.0.
+The project began from version 1.1 of the teacher-provided starter code. See
+[Babel 2 version note](#babel-2-version-note) for the original framework update.
 
 ## Requirements
 
@@ -21,18 +21,51 @@ for what changed since version 1.0.
 ## Building and running
 
 ```bash
-mvn clean package            # builds target/project1-1.0.jar (and runs the unit tests)
+mvn clean package
 scripts/run-local.sh 4 num_clients=10 run_time=20000
 ```
 
+The first command compiles the project, runs the unit tests, and creates
+`target/project1-1.0.jar`. The second command starts four local replicas and an
+automated client. If `replication` is not specified, the replicas run the
+blockchain variant. The included `crypto-material/` supports four replicas and
+clients `client1` through `client50`; addresses are configured in `babel.conf`
+and use localhost ports 9001--9004 (replicas) and 8001--8004 (clients).
+
 `run-local.sh N` starts replicas `node1` ... `nodeN` (they must exist in the
-trust store and in `babel.conf`), runs the automated client (the remaining
-arguments are properties for the client), stops everything when the client ends,
-and prints the final state digest of each replica (correct replicas should end
-with the same digest; the script waits until the state of the replicas stops
-changing, up to `MAX_WAIT` seconds, 60 by default). Properties for the replicas
-can be given in `REPLICA_OPTS`, e.g. `REPLICA_OPTS="digest_interval=2000"`.
-Logs are written to `logs/`. You can also start each process by hand:
+trust store and in `babel.conf`), runs the automated client (remaining
+arguments are client properties), stops everything when the client ends, and
+prints each replica's final state digest. Matching digests are expected when
+the selected protocol and workload converge; a mismatch may be a protocol
+result to investigate. The script waits until replica states stop changing, up
+to `MAX_WAIT` seconds (60 by default; override it as an environment variable).
+`REPLICA_OPTS` supplies properties to every replica. Logs are written to
+`logs/` and replaced on each run. Examples:
+
+```bash
+# Blockchain (also the default)
+scripts/run-local.sh 4 replication=blockchain num_clients=10 run_time=20000
+
+# BRB consensus-free variant
+REPLICA_OPTS="replication=brb" \
+  scripts/run-local.sh 4 num_clients=10 run_time=20000 label=brb-smoke
+
+# PBFT using the local evaluation parameters
+REPLICA_OPTS="replication=pbft batch_size=10 batch_timeout=50 suspect_timeout=5000 checkpoint_interval=100 log_size=200 retain=10000 fetch_range_cap=10000" \
+  scripts/run-local.sh 4 num_clients=10 run_time=20000 label=pbft-smoke
+
+# Hard-kill node3 ten seconds after the client starts
+scripts/run-local-2.sh --kill 3:10 4 num_clients=10 run_time=20000
+```
+
+`run-local-2.sh` accepts repeated `--kill <node>:<seconds>` options. It uses
+`KILL` by default; set `KILL_SIGNAL=TERM` for graceful termination. Both
+scripts observe replica state briefly after the client exits before printing
+digests. BRB does not totally order concurrent transfers from shared accounts,
+and blockchain finality is probabilistic, so equal digests are not guaranteed
+for every workload or schedule.
+
+You can also start each process by hand:
 
 ```bash
 JAVA_OPTS="-Dio.netty.transport.noNative=true"
@@ -40,6 +73,14 @@ java $JAVA_OPTS -jar target/project1-1.0.jar crypto_name=node1          # one pe
 java $JAVA_OPTS -cp target/project1-1.0.jar ClientMain                  # automated client
 java $JAVA_OPTS -cp target/project1-1.0.jar ClientMain client_mode=interactive
 ```
+
+The local scripts run all replicas on one host. For a multi-host run, put the
+jar, `babel.conf`, and the configured key material on each host; set every
+`nodeX.replica_address` and `nodeX.client_address` to reachable host addresses
+in the shared configuration; then start exactly one replica per host with its
+own `crypto_name=nodeX`. Start a client process from any host that can reach
+the client ports. Pass the same `replication` and protocol parameters to every
+replica.
 
 Any property of `babel.conf` can be overridden in the command line of the
 process that uses it. The jar includes a default logging configuration; to see
@@ -49,6 +90,81 @@ the debug messages of Babel 2, add `-Dlog4j2.configurationFile=./log4j2-debug.xm
 transport for macOS (kqueue) misbehaves in some machines (e.g., it does not
 support multicast); the portable NIO transport works everywhere.
 
+## Protocol selection and parameters
+
+Set `replication` on every replica. Supported values are `blockchain` (default),
+`brb` or `consensus-free`, and `pbft`. In the local runner, set this in
+`REPLICA_OPTS`; when starting replicas manually, pass it on each replica's
+command line. All replicas must use the same protocol and matching parameter
+values. Membership comes from the replica certificates in `trust_store`;
+four replicas give the configured fault bound `f = 1`, and seven give `f = 2`.
+
+Properties can be set in `babel.conf` or overridden on the command line. Time
+values are in milliseconds.
+
+| Replica property | Default | Meaning |
+|---|---:|---|
+| `replication` | `blockchain` | `blockchain`, `brb` / `consensus-free`, or `pbft` |
+| `threads` | `4` | Netty event-loop threads shared by replica protocols |
+| `event_queue_size` | `65536` | Capacity of each protocol event queue |
+| `digest_interval` | `5000` | Period between replica state-digest log lines |
+| `audit_enabled` | `false` | Detailed per-transfer audit logging for safety experiments; leave off for ordinary runs |
+| `reconnect_interval` | `1000` | Membership reconnect interval |
+
+Blockchain properties (`replication=blockchain`):
+
+| Property | Default | Meaning |
+|---|---:|---|
+| `blockchain_difficulty_bits` | `16` | Leading zero bits required in a mined block hash |
+| `blockchain_block_size` | `100` | Maximum transfers per block |
+| `blockchain_confirmations` | `2` | Descendant blocks required before transfers are handed to the payment application; executed transfers are not rolled back |
+| `blockchain_max_orphans` | `1000` | Maximum retained blocks whose parent has not arrived |
+| `blockchain_max_pending_transfers` | `10000` | Maximum transfers held in the local mining pool |
+
+PBFT properties (`replication=pbft`):
+
+| Property | Default | Meaning |
+|---|---:|---|
+| `batch_size` | `10` | Maximum transfers proposed in one batch |
+| `batch_timeout` | `2000` | Delay before proposing a partial batch |
+| `suspect_timeout` | `2000` | Delay before suspecting an unresponsive primary |
+| `checkpoint_interval` | `100` | Sequence interval for checkpoints |
+| `log_size` | `200` | Active protocol sequence window |
+| `retain` | `10000` | Decided sequence entries retained for recovery |
+| `fetch_range_cap` | `10000` | Maximum entries requested in one recovery fetch |
+| `fetch_grace_time` | `300` | Grace period before recovery fetch begins |
+| `fetch_retry_time` | `300` | Delay between recovery fetch attempts |
+
+Client properties (passed after the replica count to `run-local.sh`):
+
+| Property | Default | Meaning |
+|---|---:|---|
+| `first_client` / `num_clients` | `1` / `10` | Logical client identities emulated by the process |
+| `client_mode` / `client_threads` | `automated` / `2` | Automated load generator or interactive client; client event-loop threads |
+| `transfer_percentage` | `80` | Percentage of operations that are transfers |
+| `history_percentage` | `0` | Percentage of operations that read history; the remainder read balances |
+| `shared_percentage` | `0` | Percentage of transfers attempted from shared accounts owned by the client |
+| `max_amount` | `10` | Maximum transfer amount |
+| `reply_quorum` | `f+1` | Matching replies from distinct replicas required to accept an operation |
+| `operation_timeout` | `5000` | Client operation timeout |
+| `prepare_time` / `run_time` / `cooldown_time` | `3000` / `30000` / `5000` | Preparation, measurement, and post-workload observation intervals |
+| `results_file` / `label` | `results.csv` / `experiment` | Client CSV output path and run label |
+
+`transfer_percentage + history_percentage` must not exceed 100; remaining
+operations are balance reads. `shared_percentage` applies only to transfers.
+For shared-account contention experiments, use separate client processes for
+the different account owners.
+
+Opt-in `*_byzantine_profile` properties are for controlled safety experiments,
+not ordinary demonstrations. Supported values are `selective_send` for
+`brb_byzantine_profile`; `equivocate_primary_once` (also `equivocate` or
+`equivocate_primary`) for `pbft_byzantine_profile`; and `withhold_blocks`,
+`broadcast_invalid_block`, or `selective_send` for
+`blockchain_byzantine_profile`. The default is `none`. Do not set a fault profile
+globally through `REPLICA_OPTS` unless the experiment intentionally makes every
+replica with that profile faulty; assign it only to the intended replica when
+launching processes individually.
+
 ## Cryptographic material and configuration
 
 `crypto-material/` has keys for 4 replicas (`node1..node4`) and 50 clients
@@ -56,27 +172,32 @@ support multicast); the portable NIO transport works everywhere.
 setting (e.g., 7 replicas and 200 clients):
 
 ```bash
-scripts/generate-keys.sh 7 200 crypto-material
+scripts/generate-keys.sh 7 200 crypto-material-7
 ```
 
-and add `nodeX.replica_address` / `nodeX.client_address` to `babel.conf` for
-every replica. The membership is static: it is given by the certificates in
-`crypto-material/truststore.ks`. Every client owns an account with its own
-name; shared accounts (several owners) are defined by `shared_accounts`.
+The script removes existing `*.ks` and `*.cert` files in its output directory,
+so use a new output folder to preserve the supplied keys. To use the generated
+set, update `key_store_folder`, `trust_store`, `clients_key_store`, and
+`clients_trust_store` in `babel.conf`, and add `node5`...`node7` replica and
+client addresses. The configured client identity range must include every
+identity used by the workload. Membership is static and comes from certificates
+in the replica trust store. The shared-account syntax is
+`account:owner1,owner2;account2:owner3,owner4`.
 
 ## Structure
 
 | Package / file | Contents | Should you change it? |
 |---|---|---|
-| `Main.java` | Replica: creates channels and registers protocols | Yes (register your protocols) |
+| `Main.java` | Replica: selects and registers BRB, PBFT, or Blockchain | Usually no |
 | `ClientMain.java`, `client` | Automated and interactive clients | Only if needed |
 | `app` | `PaymentService` (application protocol) | Avoid it |
 | `app.ledger` | `Ledger`: deterministic state of the service | No |
 | `app.messages` | Client requests/replies and `Transfer` | No |
-| `replication` | `ReplicationProtocolPlaceholder` (incorrect!) | Replace it |
+| `replication` | BRB-backed replication and PBFT state-machine adapter | Protocol implementation |
+| `blockchain` | Proof-of-work blocks, miner, transaction pool, fork state and replication | Protocol implementation |
 | `replication.events` | `SubmitTransaction` (request), `ExecuteTransaction` (indication) | No |
 | `agreement.events` | `Propose`, `Decided`, `ViewChanged` (interface of PBFT) | Adjust if you must |
-| `broadcast` | Crash-fault (eager) reliable broadcast | Replace by BRB |
+| `broadcast` | Byzantine reliable broadcast used by BRB and Blockchain | Protocol implementation |
 | `membership` | Static membership (connections among replicas) | Only if needed |
 | `utils` | Keys, signatures, configuration | Add what you need |
 
@@ -86,9 +207,8 @@ name; shared accounts (several owners) are defined by `shared_accounts`.
   Replication -> Application: `ExecuteTransaction(transfer)` (indication, one
   transfer at a time, in the order in which they must be executed).
 * Replication -> Broadcast: `broadcast(runtime, message)` (brbBroadcast);
-  Broadcast -> Replication: `@UponBroadcastDeliver` (brbDeliver). Implement
-  your BRB as a `BroadcastProviderBabelProtocol`, exactly like the provided
-  crash-fault broadcast.
+  Broadcast -> Replication: `@UponBroadcastDeliver` (brbDeliver). The BRB
+  implementation is a `BroadcastProviderBabelProtocol`.
 * State Machine Replication -> PBFT: `Propose(value)` and `SuspectPrimary(view)`
   (requests); PBFT -> State Machine Replication: `Decided(sqn, value)` and
   `ViewChanged(view, primary)` (indications).
@@ -137,7 +257,7 @@ you can, attaching the `output.log` produced with `-Dlog4j2.configurationFile=./
   by the channel cannot be presented to third parties after the message is
   received: whenever that is needed, sign the content explicitly.
 
-## Known limitations of the base code
+## Known behavior and limitations
 
 * The ledger accepts transfers with any (future) sequence number, which stay
   pending until all previous transfers of the account are executed; a client can
@@ -154,11 +274,13 @@ you can, attaching the `output.log` produced with `-Dlog4j2.configurationFile=./
 
 ## Tests
 
-`mvn test` runs the unit tests of the ledger (including a test that shows that
-single-owner accounts converge without total order, while shared accounts may
-not), of the message serializers, and of the client quorum logic.
+`mvn test` runs unit tests for the ledger and audit journal, message
+serialization, BRB and its replication adapter, blockchain mining/state/pool
+and configuration, client reply quorums and metrics, and utilities. PBFT's
+fault and recovery behavior is covered by run-time experiments rather than a
+dedicated PBFT unit-test class.
 
-## Changes
+## Babel 2 version note
 
 ### Version 1.1 (11 October 2026)
 
@@ -183,9 +305,9 @@ What changed in the base code:
 | `Main.java` | default of 1 thread, and a warning printed when `threads` was not 1 | default of 4 threads, no warning |
 | `README.md` | "One netty thread per replica" item in "Things you must know about Babel 2" | item removed (no longer true); this section added |
 
-Nothing else changed: the application layer, the client, the protocol
-interfaces, the scripts, the tests and the cryptographic material are the same
-as in version 1.0.
+The table above records only the original starter-code change from version 1.0
+to version 1.1. This repository has since added the BRB, PBFT, and Blockchain
+implementations, related tests, and experiment support described in this README.
 
 If you already started from version 1.0, you do not need to start over: in
 your `pom.xml`, change the version of `babel2-ip-core` and of
